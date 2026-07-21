@@ -1,0 +1,8 @@
+ # 先看设备名
+  lsusb | grep -i "MVS\|Hik\|MV-\|MachineVision"
+
+# 再看拓扑
+  lsusb -t
+
+  两个相机都插上跑完 lsusb -t 
+ [0]自定义客户端      是 [1]自瞄。
