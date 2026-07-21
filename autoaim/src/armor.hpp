@@ -86,6 +86,8 @@ struct Target {
     double normal_last_seen_time = 0.0;
     bool outpost_z_calibrated = true;
     int outpost_observed_plate = -1;
+    bool outpost_has_observed_z = false;
+    double outpost_observed_z = 0.0;
     double outpost_angle_offsets[3] = {0.0, 2.0943951023931953, 4.1887902047863905};
     double outpost_last_seen_time = 0.0;
     double outpost_phase_error = 0.0;

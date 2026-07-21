@@ -228,16 +228,40 @@ int main(int argc, char *argv[]) {
                                                 target.armor_type,
                                                 target.armor_num == 3);
                     if (pts.size() == 4) {
-                        for (int k = 0; k < 4; k++) {
-                            cv::line(img, pts[k], pts[(k + 1) % 4],
-                                     cv::Scalar(255, 0, 255), 3);
-                        }
                         const std::string selected_label = target.armor_num == 3 ?
                             fmt::format("SEL P{}", solver.selectedArmorIndex()) : "SEL";
-                        cv::putText(img, selected_label,
-                                    pts[0] + cv::Point2f(0, -10),
-                                    cv::FONT_HERSHEY_DUPLEX, 0.7,
-                                    cv::Scalar(255, 0, 255), 2);
+                        const bool outpost_preselect =
+                            target.armor_num == 3 &&
+                            solver.selectedArmorIndex() != target.outpost_observed_plate;
+                        if (outpost_preselect) {
+                            cv::Point2f center(0.0f, 0.0f);
+                            for (const auto &pt : pts) {
+                                center += pt;
+                            }
+                            center *= 0.25f;
+                            constexpr float cross_len = 8.0f;
+                            cv::line(img,
+                                     center + cv::Point2f(-cross_len, 0.0f),
+                                     center + cv::Point2f(cross_len, 0.0f),
+                                     cv::Scalar(255, 0, 255), 2);
+                            cv::line(img,
+                                     center + cv::Point2f(0.0f, -cross_len),
+                                     center + cv::Point2f(0.0f, cross_len),
+                                     cv::Scalar(255, 0, 255), 2);
+                            cv::putText(img, selected_label,
+                                        center + cv::Point2f(10, -10),
+                                        cv::FONT_HERSHEY_DUPLEX, 0.6,
+                                        cv::Scalar(255, 0, 255), 2);
+                        } else {
+                            for (int k = 0; k < 4; k++) {
+                                cv::line(img, pts[k], pts[(k + 1) % 4],
+                                         cv::Scalar(255, 0, 255), 3);
+                            }
+                            cv::putText(img, selected_label,
+                                        pts[0] + cv::Point2f(0, -10),
+                                        cv::FONT_HERSHEY_DUPLEX, 0.7,
+                                        cv::Scalar(255, 0, 255), 2);
+                        }
                     }
                 }
 

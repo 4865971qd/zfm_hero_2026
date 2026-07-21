@@ -291,8 +291,13 @@ void Tracker::update(const std::list<Armor> &armors, std::chrono::steady_clock::
             target_.outpost_z_calibrated = outpost_->isZCalibrated();
             if (accepted_reliable_observation) {
                 target_.outpost_last_seen_time = t_sec;
+                target_.outpost_has_observed_z = true;
+                target_.outpost_observed_z = oz;
             } else if (found) {
                 target_.outpost_last_seen_time = 0;
+                target_.outpost_has_observed_z = false;
+            } else {
+                target_.outpost_has_observed_z = false;
             }
             target_.outpost_phase_error = outpost_->getPhaseError();
             target_.valid = true;
@@ -305,6 +310,7 @@ void Tracker::update(const std::list<Armor> &armors, std::chrono::steady_clock::
             target_.valid = false;
             target_.outpost_z_calibrated = false;
             target_.outpost_observed_plate = -1;
+            target_.outpost_has_observed_z = false;
             return;
         }
 
@@ -330,6 +336,7 @@ void Tracker::update(const std::list<Armor> &armors, std::chrono::steady_clock::
                     target_.valid = false;
                     target_.outpost_z_calibrated = false;
                     target_.outpost_observed_plate = -1;
+                    target_.outpost_has_observed_z = false;
                     target_.outpost_last_seen_time = 0;
                     target_.outpost_phase_error = 0;
                 }
@@ -496,6 +503,7 @@ void Tracker::update(const std::list<Armor> &armors, std::chrono::steady_clock::
     target_.normal_last_seen_time = normal_last_seen_time_;
     target_.outpost_z_calibrated = true;
     target_.outpost_observed_plate = -1;
+    target_.outpost_has_observed_z = false;
     target_.outpost_last_seen_time = 0;
     target_.outpost_phase_error = 0;
     target_.valid = (tracker_state_ == TrackerState::TRACKING || tracker_state_ == TrackerState::TEMP_LOST);

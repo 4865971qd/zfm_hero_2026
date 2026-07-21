@@ -635,9 +635,7 @@ bool OutpostTracker::addMeasurement(double x, double y, double z, double yaw, do
     last_ang_ = ang;
     last_t_ = t;
     last_z_ = z;
-    if (state_ != ACTIVE) {
-        updateZPlate(observed_plate, z);
-    }
+    updateZPlate(observed_plate, z);
     current_plate_ = observed_plate;
     phase_error_ = phase_residual;
     last_obs_angle_ = corrected_angle;

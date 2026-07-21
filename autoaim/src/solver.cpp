@@ -533,6 +533,9 @@ GimbalCommand Solver::solve(const Target &target, double current_time) {
     double default_outpost_offsets[3] = {0, 2 * M_PI / 3, 4 * M_PI / 3};
     const double *offs = outpost_offsets ? outpost_offsets : default_outpost_offsets;
     if (armors_num == 3 && !outpost_single_plate && std::abs(target_v_yaw) > 0.01) {
+        const bool has_current_observation =
+            target.outpost_has_observed_z && outpost_observation_fresh;
+
         const double arrival_fireline = std::atan2(
             -target_from_muzzle_predicted.y(), -target_from_muzzle_predicted.x());
         double diffs[3];
@@ -542,22 +545,66 @@ GimbalCommand Solver::solve(const Target &target, double current_time) {
             approaching[i] = (target_v_yaw * diffs[i] < 0);
         }
 
-        int candidate = 0;
-        double candidate_abs = std::abs(diffs[0]);
-        for (int i = 0; i < 3; ++i) {
-            const double abs_diff = std::abs(diffs[i]);
-            if (abs_diff < candidate_abs) {
-                candidate = i;
-                candidate_abs = abs_diff;
-            }
-        }
-
         constexpr double kSwitchMargin = 22.0 * M_PI / 180.0;
         constexpr double kHoldWindow = 55.0 * M_PI / 180.0;
         constexpr double kForceSwitch = 88.0 * M_PI / 180.0;
         constexpr double kConfirmTime = 0.090;
         constexpr double kMinSwitchInterval = 0.160;
-        if (aim_idx_ < 0 || aim_idx_ >= 3) {
+
+        int current_plate = target.outpost_observed_plate;
+        if (current_plate < 0 || current_plate >= 3) {
+            current_plate = (aim_idx_ >= 0 && aim_idx_ < 3) ? aim_idx_ : idx;
+        }
+        current_plate = std::clamp(current_plate, 0, 2);
+
+        auto positiveAngle = [](double angle) {
+            double wrapped = std::fmod(angle, 2.0 * M_PI);
+            if (wrapped < 0.0) {
+                wrapped += 2.0 * M_PI;
+            }
+            return wrapped;
+        };
+        int next_plate = current_plate;
+        double next_step = 1e9;
+        for (int i = 0; i < 3; ++i) {
+            if (i == current_plate) continue;
+            const double step = target_v_yaw < 0.0 ?
+                positiveAngle(offs[current_plate] - offs[i]) :
+                positiveAngle(offs[i] - offs[current_plate]);
+            if (step > 1e-6 && step < next_step) {
+                next_step = step;
+                next_plate = i;
+            }
+        }
+
+        if (aim_idx_ >= 0 && aim_idx_ < 3 &&
+            aim_idx_ != current_plate && aim_idx_ != next_plate) {
+            aim_idx_ = current_plate;
+            outpost_pending_idx_ = -1;
+            outpost_pending_since_ = -1.0;
+        }
+
+        const double current_abs_for_candidate = std::abs(diffs[current_plate]);
+        const double next_abs = std::abs(diffs[next_plate]);
+        const bool current_unusable_for_candidate =
+            !approaching[current_plate] || current_abs_for_candidate > kHoldWindow;
+        int candidate = current_plate;
+        if (current_unusable_for_candidate &&
+            (approaching[next_plate] ||
+             next_abs + kSwitchMargin < current_abs_for_candidate ||
+             current_abs_for_candidate > kForceSwitch)) {
+            candidate = next_plate;
+        }
+        const double candidate_abs = std::abs(diffs[candidate]);
+
+        if (has_current_observation) {
+            if (aim_idx_ != current_plate) {
+                outpost_last_switch_time_ = current_time;
+            }
+            aim_idx_ = current_plate;
+            outpost_pending_idx_ = -1;
+            outpost_pending_since_ = -1.0;
+        } else if (aim_idx_ < 0 || aim_idx_ >= 3) {
             aim_idx_ = candidate;
             outpost_pending_idx_ = -1;
             outpost_pending_since_ = -1.0;
@@ -597,7 +644,16 @@ GimbalCommand Solver::solve(const Target &target, double current_time) {
 
         double z_offsets[3] = {0, target.state[9], target.d_za};
         aim_z = z_offsets[aim_idx_];
-        if (!smooth_aim_z_initialized_[aim_idx_]) {
+        const bool use_observed_z =
+            aim_idx_ == target.outpost_observed_plate &&
+            target.outpost_has_observed_z &&
+            outpost_observation_fresh &&
+            std::isfinite(target.outpost_observed_z);
+        if (use_observed_z) {
+            aim_z = target.outpost_observed_z - target_position_predicted.z();
+            smooth_aim_z_[aim_idx_] = aim_z;
+            smooth_aim_z_initialized_[aim_idx_] = true;
+        } else if (!smooth_aim_z_initialized_[aim_idx_]) {
             smooth_aim_z_[aim_idx_] = aim_z;
             smooth_aim_z_initialized_[aim_idx_] = true;
         } else {
@@ -624,10 +680,10 @@ GimbalCommand Solver::solve(const Target &target, double current_time) {
             getLogger()->debug(
                 "[Outpost][SELECT_PHASE] current_angle={:.3f} target_v_yaw={:.3f} "
                 "normalized_omega={:.3f} prediction_dt={:.3f} future_angle={:.3f} "
-                "current_plate={} selected_plate={} candidate_phase={:.3f} "
+                "current_plate={} next_plate={} selected_plate={} candidate_phase={:.3f} "
                 "candidate_z={:.3f}",
                 target.state[6], target_v_yaw, target_v_yaw, dt, target_yaw,
-                target.outpost_observed_plate, aim_idx_, plate_angle,
+                target.outpost_observed_plate, next_plate, aim_idx_, plate_angle,
                 target_position_predicted.z() + aim_z);
         }
         calcYawAndPitch(aim_point, yaw, pitch);
