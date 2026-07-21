@@ -76,6 +76,9 @@ solver:
   max_tracking_v_yaw: 60.0
   min_switching_v_yaw: 0.5
   side_angle: 45.0
+  normal_select_hysteresis_base: 0.010
+  normal_select_hysteresis_gain: 0.015
+  normal_select_hysteresis_max: 0.045
   pitch_dead_zone: 0.1
   yaw_dead_zone: 0.1
   shooting_range_width: 0.135
@@ -119,5 +122,6 @@ debug:
   show_selected: true        # 选中装甲板可视化 (解算瞄准的装甲板)
   enable_plotter: false       # PlotJuggler 曲线
   enable_record: false       # 视频录制
+  enable_logic_log: false     # Tracker/Solver logic diagnostics
   record_fps: 60
   log_level: "debug"

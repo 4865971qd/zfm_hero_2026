@@ -130,7 +130,10 @@ bool Tracker::handleArmorJump(const Armor &a, double yaw) {
     const double previous_d_za = d_za_;
     const double previous_d_zc = d_zc_;
     const double previous_another_r = another_r_;
+    const double previous_r = target_state_(8);
+    const double previous_yaw = target_state_(6);
     double ly = target_state_(6);
+    const double yaw_jump = angleDifference(yaw, ly);
     if (angleDifference(yaw, ly) > 0.4) {
         target_state_(6) = yaw;
         if (tracked_num_ == ArmorsNum::NORMAL_4) {
@@ -146,13 +149,26 @@ bool Tracker::handleArmorJump(const Armor &a, double yaw) {
     Eigen::Vector3d ip(target_state_(0) - target_state_(8)*cos(target_state_(6)),
                        target_state_(2) - target_state_(8)*sin(target_state_(6)),
                        target_state_(4) + target_state_(9));
-    if ((cp - ip).norm() > max_match_dist_) {
+    const double infer_error = (cp - ip).norm();
+    const bool reset_center = infer_error > max_match_dist_;
+    if (reset_center) {
         d_zc_ = 0;
         double r = target_state_(8);
         target_state_(0) = a.xyz_in_world.x() + r*cos(yaw);
         target_state_(2) = a.xyz_in_world.y() + r*sin(yaw);
         target_state_(4) = a.xyz_in_world.z();
         target_state_(9) = d_zc_;
+    }
+    if (debug_ && tracked_num_ == ArmorsNum::NORMAL_4) {
+        getLogger()->debug(
+            "[Normal][JUMP] id={} yaw_before={:.3f} yaw_meas={:.3f} yaw_diff={:.3f} "
+            "r_before={:.3f}/{:.3f} r_after={:.3f}/{:.3f} "
+            "dz_before={:.3f}/{:.3f} dz_after={:.3f}/{:.3f} "
+            "infer_error={:.3f} reset_center={}",
+            tracked_id_, previous_yaw, yaw, yaw_jump,
+            previous_r, previous_another_r, target_state_(8), another_r_,
+            previous_d_zc, previous_d_za, d_zc_, d_za_,
+            infer_error, reset_center ? 1 : 0);
     }
     if (!target_state_.allFinite()) {
         target_state_ = previous_state;
@@ -409,46 +425,115 @@ void Tracker::update(const std::list<Armor> &armors, std::chrono::steady_clock::
 
     if (!armors.empty()) {
         Armor same_id; int same_count = 0;
-        Eigen::Vector3d ppos(target_state_(0) - target_state_(8)*cos(target_state_(6)),
-                             target_state_(2) - target_state_(8)*sin(target_state_(6)),
-                             target_state_(4) + target_state_(9));
         double min_pos_diff = DBL_MAX;
         double yaw_diff = DBL_MAX;
+        int matched_plate = 0;
+        double matched_base_yaw = target_state_(6);
 
         for (const auto &a : armors) {
             if (a.number == tracked_id_) {
                 same_id = a; same_count++;
                 Eigen::Vector3d ap(a.xyz_in_world.x(), a.xyz_in_world.y(), a.xyz_in_world.z());
-                double pd = (ppos - ap).norm();
-                if (pd < min_pos_diff) {
-                    min_pos_diff = pd;
-                    const double candidate_yaw = unwrapNear(
-                        a.ypr_in_world[0], target_state_(6));
-                    yaw_diff = angleDifference(candidate_yaw, target_state_(6));
-                    tracked_armor_ = a;
+                if (tracked_num_ == ArmorsNum::NORMAL_4) {
+                    for (int plate = 0; plate < 4; ++plate) {
+                        const double off = plate * M_PI / 2.0;
+                        const bool current_pair = (plate % 2 == 0);
+                        const double r = current_pair ? target_state_(8) : another_r_;
+                        const double dz = target_state_(9) + (current_pair ? 0.0 : d_za_);
+                        Eigen::Vector3d predicted_plate(
+                            target_state_(0) - r * std::cos(target_state_(6) + off),
+                            target_state_(2) - r * std::sin(target_state_(6) + off),
+                            target_state_(4) + dz);
+                        double pd = (predicted_plate - ap).norm();
+                        if (pd < min_pos_diff) {
+                            min_pos_diff = pd;
+                            matched_plate = plate;
+                            double best_yaw = unwrapNear(
+                                a.ypr_in_world[0] - off, target_state_(6));
+                            double best_yaw_diff = angleDifference(best_yaw, target_state_(6));
+                            for (int ambiguity_sign = -1; ambiguity_sign <= 1; ambiguity_sign += 2) {
+                                const double ambiguity = ambiguity_sign * M_PI;
+                                double candidate_yaw = unwrapNear(
+                                    a.ypr_in_world[0] + ambiguity - off, target_state_(6));
+                                double candidate_diff =
+                                    angleDifference(candidate_yaw, target_state_(6));
+                                if (candidate_diff < best_yaw_diff) {
+                                    best_yaw = candidate_yaw;
+                                    best_yaw_diff = candidate_diff;
+                                }
+                            }
+                            yaw_diff = best_yaw_diff;
+                            matched_base_yaw = best_yaw;
+                            tracked_armor_ = a;
+                        }
+                    }
+                } else {
+                    Eigen::Vector3d ppos(
+                        target_state_(0) - target_state_(8) * cos(target_state_(6)),
+                        target_state_(2) - target_state_(8) * sin(target_state_(6)),
+                        target_state_(4) + target_state_(9));
+                    double pd = (ppos - ap).norm();
+                    if (pd < min_pos_diff) {
+                        min_pos_diff = pd;
+                        const double candidate_yaw = unwrapNear(
+                            a.ypr_in_world[0], target_state_(6));
+                        yaw_diff = angleDifference(candidate_yaw, target_state_(6));
+                        matched_base_yaw = candidate_yaw;
+                        tracked_armor_ = a;
+                    }
                 }
             }
         }
 
-        if (min_pos_diff < max_match_dist_ && yaw_diff < max_match_yaw_) {
-            double m_yaw = unwrapNear(
-                tracked_armor_.ypr_in_world[0], target_state_(6));
-            measurement_ << tracked_armor_.xyz_in_world.x(),
-                            tracked_armor_.xyz_in_world.y(),
-                            tracked_armor_.xyz_in_world.z(),
-                            m_yaw;
+        if (min_pos_diff < max_match_dist_ &&
+            (tracked_num_ == ArmorsNum::NORMAL_4 || yaw_diff < max_match_yaw_)) {
+            if (tracked_num_ == ArmorsNum::NORMAL_4) {
+                const double off = matched_plate * M_PI / 2.0;
+                const bool current_pair = (matched_plate % 2 == 0);
+                const double observed_r = current_pair ? target_state_(8) : another_r_;
+                const double base_yaw = matched_base_yaw;
+                Eigen::Vector3d observed(
+                    tracked_armor_.xyz_in_world.x(),
+                    tracked_armor_.xyz_in_world.y(),
+                    tracked_armor_.xyz_in_world.z());
+                Eigen::Vector3d measured_center(
+                    observed.x() + observed_r * std::cos(base_yaw + off),
+                    observed.y() + observed_r * std::sin(base_yaw + off),
+                    target_state_(4));
+                Eigen::Vector3d equivalent_plate0(
+                    measured_center.x() - target_state_(8) * std::cos(base_yaw),
+                    measured_center.y() - target_state_(8) * std::sin(base_yaw),
+                    observed.z() - (current_pair ? 0.0 : d_za_));
+                measurement_ << equivalent_plate0.x(),
+                                equivalent_plate0.y(),
+                                equivalent_plate0.z(),
+                                base_yaw;
+            } else {
+                measurement_ << tracked_armor_.xyz_in_world.x(),
+                                tracked_armor_.xyz_in_world.y(),
+                                tracked_armor_.xyz_in_world.z(),
+                                matched_base_yaw;
+            }
             const Eigen::VectorXd state_before_update = target_state_;
             Eigen::VectorXd updated_state = ekf_->update(measurement_);
             if (updated_state.allFinite()) {
                 matched = true;
                 target_state_ = updated_state;
+                if (tracked_num_ == ArmorsNum::NORMAL_4 && matched_plate % 2 == 1) {
+                    const double measured_d_za =
+                        tracked_armor_.xyz_in_world.z() - (target_state_(4) + target_state_(9));
+                    if (std::isfinite(measured_d_za) && std::abs(measured_d_za) < 0.25) {
+                        d_za_ += 0.05 * (measured_d_za - d_za_);
+                    }
+                }
                 normal_last_seen_time_ = t_sec;
                 target_.armor_type = tracked_armor_.type;
             } else {
                 target_state_ = state_before_update;
                 ekf_->setState(target_state_);
             }
-        } else if (same_count == 1 && yaw_diff > max_match_yaw_) {
+        } else if (tracked_num_ != ArmorsNum::NORMAL_4 &&
+                   same_count == 1 && yaw_diff > max_match_yaw_) {
             const double jump_yaw = unwrapNear(
                 same_id.ypr_in_world[0], target_state_(6));
             matched = handleArmorJump(same_id, jump_yaw);
@@ -457,6 +542,40 @@ void Tracker::update(const std::list<Armor> &armors, std::chrono::steady_clock::
                 target_.armor_type = same_id.type;
                 normal_last_seen_time_ = t_sec;
             }
+        }
+
+        if (debug_ && tracked_num_ == ArmorsNum::NORMAL_4) {
+            static unsigned long long normal_track_log_sequence = 0;
+            ++normal_track_log_sequence;
+            if (!matched || normal_track_log_sequence % 20 == 1) {
+                getLogger()->debug(
+                    "[Normal][TRACK] seq={} id={} state={} matched={} same_count={} plate={} "
+                    "dt={:.4f} stationary={} pos_diff={:.3f} yaw_diff={:.3f} "
+                    "meas=({:.3f},{:.3f},{:.3f}) meas_yaw={:.3f} "
+                    "center=({:.3f},{:.3f},{:.3f}) yaw={:.3f} v_yaw={:.3f} "
+                    "r=({:.3f},{:.3f}) dz=({:.3f},{:.3f})",
+                    normal_track_log_sequence, tracked_id_,
+                    static_cast<int>(tracker_state_), matched ? 1 : 0, same_count,
+                    matched_plate,
+                    dt, stationary_mode_ ? 1 : 0, min_pos_diff, yaw_diff,
+                    tracked_armor_.xyz_in_world.x(),
+                    tracked_armor_.xyz_in_world.y(),
+                    tracked_armor_.xyz_in_world.z(),
+                    tracked_armor_.ypr_in_world[0],
+                    target_state_(0), target_state_(2), target_state_(4),
+                    target_state_(6), target_state_(7),
+                    target_state_(8), another_r_, target_state_(9), d_za_);
+            }
+        }
+    } else if (debug_ && tracked_num_ == ArmorsNum::NORMAL_4) {
+        static unsigned long long normal_empty_log_sequence = 0;
+        if (++normal_empty_log_sequence % 20 == 1) {
+            getLogger()->debug(
+                "[Normal][TRACK] id={} state={} matched=0 no_armors dt={:.4f} "
+                "center=({:.3f},{:.3f},{:.3f}) yaw={:.3f} v_yaw={:.3f}",
+                tracked_id_, static_cast<int>(tracker_state_), dt,
+                target_state_(0), target_state_(2), target_state_(4),
+                target_state_(6), target_state_(7));
         }
     }
 

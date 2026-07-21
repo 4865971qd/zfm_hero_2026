@@ -34,6 +34,7 @@ public:
     TrackerState state() const { return tracker_state_; }
     std::string trackedId() const { return tracked_id_; }
     ArmorsNum armorsNum() const { return tracked_num_; }
+    void setDebug(bool d) { debug_ = d; }
 
     std::vector<Eigen::Vector3d> getOutpostPredicted(double t, double dt = 0);
     bool getOutpostCircleParams(double &cx, double &cy, double &R, double &omega);
@@ -80,6 +81,7 @@ private:
     double d_za_ = 0;
     double d_zc_ = 0;
     double another_r_ = 0;
+    bool debug_ = false;
 
     std::chrono::steady_clock::time_point last_t_;
 };

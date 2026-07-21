@@ -72,6 +72,9 @@ int main(int argc, char *argv[]) {
     bool show_sel = cfg["debug"]["show_selected"].as<bool>(true);
     bool do_plot = cfg["debug"]["enable_plotter"].as<bool>(true);
     bool do_record = cfg["debug"]["enable_record"].as<bool>(false);
+    bool logic_debug = cfg["debug"]["enable_logic_log"].as<bool>(false);
+    solver.setDebug(logic_debug);
+    tracker.setDebug(logic_debug);
 
     autoaim::getLogger()->info("AutoAim initialized. Waiting for data...");
 
@@ -94,11 +97,13 @@ int main(int argc, char *argv[]) {
 
         // 2. Read serial data without blocking the vision loop.
         static autoaim::hardware::SerialRx last_rx;
+        static bool has_rx = false;
         bool got_rx = serial.isOpen() ? serial.receive(rx) : false;
         if (!got_rx && serial.isOpen()) {
             rx = last_rx;
         } else if (got_rx) {
             last_rx = rx;
+            has_rx = true;
         }
 
         // 3. Update IMU pose. The MCU protocol uses degrees; Eigen uses radians.
@@ -108,11 +113,18 @@ int main(int argc, char *argv[]) {
         solver.setImu(imu_roll, imu_pitch, imu_yaw);
 
         static unsigned long long imu_log_sequence = 0;
-        if (++imu_log_sequence % 200 == 1) {
+        if (logic_debug && ++imu_log_sequence % 100 == 1) {
+            const double img_time =
+                std::chrono::duration<double>(t.time_since_epoch()).count();
+            const auto last_rx_time = serial.lastRxTime();
+            const double serial_age = (serial.isOpen() && has_rx) ?
+                std::chrono::duration<double>(t - last_rx_time).count() : -1.0;
             autoaim::getLogger()->debug(
-                "[Outpost][IMU] raw_deg=({:.2f},{:.2f},{:.2f}) "
-                "solver_rad=({:.4f},{:.4f},{:.4f})",
-                rx.roll, rx.pitch, rx.yaw, imu_roll, imu_pitch, imu_yaw);
+                "[Logic][IMU] raw_deg=({:.2f},{:.2f},{:.2f}) "
+                "solver_rad=({:.4f},{:.4f},{:.4f}) img_time={:.6f} "
+                "serial_valid={} serial_age={:.4f}",
+                rx.roll, rx.pitch, rx.yaw, imu_roll, imu_pitch, imu_yaw,
+                img_time, has_rx ? 1 : 0, serial_age);
         }
 
         // 4. Detect armors.

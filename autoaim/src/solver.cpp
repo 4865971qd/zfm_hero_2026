@@ -109,6 +109,16 @@ Solver::Solver(const YAML::Node &cfg) {
         s["center_switch_confirm_time"].as<double>(0.05);
     side_angle_ = s["side_angle"].as<double>(45.0);
     min_switching_v_yaw_ = s["min_switching_v_yaw"].as<double>(0.5);
+    normal_select_hysteresis_base_ =
+        s["normal_select_hysteresis_base"].as<double>(0.010);
+    normal_select_hysteresis_gain_ =
+        s["normal_select_hysteresis_gain"].as<double>(0.015);
+    normal_select_hysteresis_max_ =
+        s["normal_select_hysteresis_max"].as<double>(0.045);
+    normal_select_hysteresis_base_ = std::max(0.0, normal_select_hysteresis_base_);
+    normal_select_hysteresis_gain_ = std::max(0.0, normal_select_hysteresis_gain_);
+    normal_select_hysteresis_max_ = std::max(
+        normal_select_hysteresis_base_, normal_select_hysteresis_max_);
     yaw_dead_zone_ = s["yaw_dead_zone"].as<double>(0.1);
     pitch_dead_zone_ = s["pitch_dead_zone"].as<double>(0.1);
 
@@ -268,7 +278,6 @@ int Solver::selectBestArmor(const std::vector<Eigen::Vector3d> &positions,
                             int num,
                             double flying_time,
                             const double *angle_offsets) const noexcept {
-    (void)positions;
     double alpha = std::atan2(center.y(), center.x());
     double beta = yaw;
     Eigen::Matrix2d R_o2c, R_o2a;
@@ -323,7 +332,75 @@ int Solver::selectBestArmor(const std::vector<Eigen::Vector3d> &positions,
         }
         return best;
     }
-    return sel;
+
+    const int angular_sel = sel;
+    int raw_sel = angular_sel;
+    double raw_dist = DBL_MAX;
+    bool raw_dist_valid = false;
+    if (static_cast<int>(positions.size()) >= num) {
+        for (int i = 0; i < num; ++i) {
+            const double dist = positions[i].norm();
+            if (std::isfinite(dist) && dist < raw_dist) {
+                raw_dist = dist;
+                raw_sel = i;
+                raw_dist_valid = true;
+            }
+        }
+    }
+
+    int final_sel = raw_sel;
+    bool held = false;
+    double stable_dist = DBL_MAX;
+    double hysteresis = 0.0;
+    const int stable_before = normal_stable_idx_;
+    if (stable_before >= 0 && stable_before < num &&
+        static_cast<int>(positions.size()) > stable_before &&
+        stable_before != raw_sel) {
+        stable_dist = positions[stable_before].norm();
+        const double lead_angle = std::max(0.0, std::abs(v_yaw) * std::max(0.0, flying_time));
+        hysteresis = std::clamp(
+            normal_select_hysteresis_base_ +
+                normal_select_hysteresis_gain_ * lead_angle,
+            normal_select_hysteresis_base_,
+            normal_select_hysteresis_max_);
+        if (raw_dist_valid && std::isfinite(stable_dist) &&
+            raw_dist + hysteresis >= stable_dist) {
+            final_sel = stable_before;
+            held = true;
+        }
+    }
+    normal_stable_idx_ = final_sel;
+
+    if (debug_) {
+        static unsigned long long normal_select_log_sequence = 0;
+        static int last_normal_selected = -1;
+        ++normal_select_log_sequence;
+        const double cell = 2 * M_PI / num;
+        const double inside_cell = std::fmod(tmp, cell);
+        const double boundary_margin = std::min(inside_cell, cell - inside_cell);
+        const bool selection_changed = final_sel != last_normal_selected;
+        const bool near_boundary = boundary_margin < 5.0 * M_PI / 180.0;
+        if (selection_changed || held || near_boundary ||
+            normal_select_log_sequence % 20 == 1) {
+            getLogger()->debug(
+                "[Normal][SELECT] seq={} num={} selected={} raw={} angular={} "
+                "stable_before={} changed={} held={} "
+                "center=({:.3f},{:.3f},{:.3f}) yaw={:.3f} v_yaw={:.3f} "
+                "flight={:.4f} alpha={:.3f} decision={:.3f} theta={:.3f} "
+                "tmp={:.3f} boundary_margin_deg={:.1f} "
+                "raw_dist={:.3f} stable_dist={:.3f} hysteresis={:.3f}",
+                normal_select_log_sequence, num, final_sel, raw_sel, angular_sel,
+                stable_before, selection_changed ? 1 : 0, held ? 1 : 0,
+                center.x(), center.y(), center.z(), yaw, v_yaw,
+                flying_time, alpha, dec, theta, tmp,
+                boundary_margin * 180.0 / M_PI,
+                raw_dist_valid ? raw_dist : -1.0,
+                std::isfinite(stable_dist) && stable_dist < DBL_MAX ? stable_dist : -1.0,
+                hysteresis);
+            last_normal_selected = final_sel;
+        }
+    }
+    return final_sel;
 }
 
 void Solver::calcYawAndPitch(const Eigen::Vector3d &p, double &yaw, double &pitch) const noexcept {
@@ -376,6 +453,7 @@ GimbalCommand Solver::solve(const Target &target, double current_time) {
         !std::isfinite(current_time)) {
         has_selected_armor_ = false;
         selected_armor_index_ = -1;
+        normal_stable_idx_ = -1;
         resetCommandDeadZone();
         return {};
     }
@@ -395,6 +473,7 @@ GimbalCommand Solver::solve(const Target &target, double current_time) {
         outpost_pending_idx_ = -1;
         outpost_pending_since_ = -1.0;
         outpost_last_switch_time_ = -1.0;
+        normal_stable_idx_ = -1;
         has_selected_armor_ = false;
         selected_armor_index_ = -1;
         resetCommandDeadZone();
@@ -413,6 +492,8 @@ GimbalCommand Solver::solve(const Target &target, double current_time) {
         outpost_pending_idx_ = -1;
         outpost_pending_since_ = -1.0;
         outpost_last_switch_time_ = -1.0;
+    } else {
+        normal_stable_idx_ = -1;
     }
     bool outpost_model_ok = true;
     bool outpost_prediction_ok = true;
@@ -420,6 +501,9 @@ GimbalCommand Solver::solve(const Target &target, double current_time) {
     bool outpost_phase_valid = false;
     const bool normal_model_ok = !is_outpost && isFresh(
         current_time, target.normal_last_seen_time, normal_max_fire_unseen_time_);
+    if (!is_outpost && !normal_model_ok) {
+        normal_stable_idx_ = -1;
+    }
     if (is_outpost) {
         double unseen_time = current_time - target.outpost_last_seen_time;
         outpost_observation_fresh = target.outpost_last_seen_time > 0 &&
@@ -527,7 +611,8 @@ GimbalCommand Solver::solve(const Target &target, double current_time) {
     double outpost_diff_deg = 99.0;
     double aim_z = 0.0;
     Eigen::Vector3d selected_visualization_position = chosen_armor_position;
-    double selected_visualization_yaw = target_yaw;
+    double selected_visualization_yaw = (armors_num == 3) ?
+        target_yaw : target_yaw + idx * (2 * M_PI / armors_num);
     int selected_visualization_index = outpost_single_plate ? 0 : idx;
     bool selected_visualization_valid = true;
     double default_outpost_offsets[3] = {0, 2 * M_PI / 3, 4 * M_PI / 3};
@@ -730,7 +815,7 @@ GimbalCommand Solver::solve(const Target &target, double current_time) {
                 return {};
             }
             selected_visualization_position = chosen_armor_position;
-            selected_visualization_yaw = target_yaw;
+            selected_visualization_yaw = target_yaw + idx * (2 * M_PI / armors_num);
             selected_visualization_index = idx;
             calcYawAndPitch(chosen_armor_position, yaw, pitch);
         }

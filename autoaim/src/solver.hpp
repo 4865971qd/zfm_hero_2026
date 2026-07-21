@@ -109,6 +109,9 @@ private:
     double normal_max_fire_unseen_time_ = 0.10;
     double side_angle_ = 45.0;
     double min_switching_v_yaw_ = 0.5;
+    double normal_select_hysteresis_base_ = 0.010;
+    double normal_select_hysteresis_gain_ = 0.015;
+    double normal_select_hysteresis_max_ = 0.045;
     double yaw_dead_zone_ = 0.1;
     double pitch_dead_zone_ = 0.1;
 
@@ -123,6 +126,7 @@ private:
     mutable int outpost_pending_idx_ = -1;
     mutable double outpost_pending_since_ = -1.0;
     mutable double outpost_last_switch_time_ = -1.0;
+    mutable int normal_stable_idx_ = -1;
 
     Eigen::Vector3d selected_armor_pos_{0, 0, 0};
     double selected_armor_yaw_ = 0;
