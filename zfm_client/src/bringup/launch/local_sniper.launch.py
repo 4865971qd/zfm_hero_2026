@@ -31,7 +31,7 @@ def generate_launch_description():
                 plugin='hik_camera::HikCameraNode',
                 name='hik_camera',
                 parameters=[{
-                    'device_index': 0,       # 本地测试用第一个相机
+                    'device_index': 1,       # 本地测试用第二个相机
                     'exposure_time': 12000.0,
                     'gain': 10.0,
                 }],

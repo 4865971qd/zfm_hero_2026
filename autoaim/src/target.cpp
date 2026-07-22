@@ -27,7 +27,7 @@ constexpr double kMaxFitCenterShift = 0.05;
 constexpr double kMaxFitRadiusShift = 0.03;
 constexpr double kMaxCircleCollectionGap = 1.0;
 constexpr double kStopConfirmationWindow = 0.35;
-constexpr double kStaticMotionSpan = 0.05;
+constexpr double kStaticMotionSpan = 0.10;
 constexpr size_t kMinCircleFitSamples = 12;
 constexpr size_t kMaxCircleFitSamples = 1024;
 

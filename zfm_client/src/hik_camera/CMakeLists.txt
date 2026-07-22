@@ -60,13 +60,6 @@ install(TARGETS
   RUNTIME DESTINATION bin
 )
 
-# 安装config目录
-# 安装配置文件
-install(DIRECTORY
-  config
-  DESTINATION share/${PROJECT_NAME}
-)
-
 # =======================================
 
 # 导出依赖

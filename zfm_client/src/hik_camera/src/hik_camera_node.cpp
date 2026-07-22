@@ -32,7 +32,7 @@ public:
       nRet = MV_CC_EnumDevices(MV_USB_DEVICE, &device_list);
     }
 
-    int device_index = this->declare_parameter("device_index", 0);
+    int device_index = this->declare_parameter("device_index", 1);
     if (device_index >= static_cast<int>(device_list.nDeviceNum)) {
       RCLCPP_WARN(this->get_logger(),
         "device_index=%d >= nDeviceNum=%d, fallback to 0",
@@ -73,14 +73,6 @@ public:
     camera_name_ = this->declare_parameter("camera_name", "narrow_stereo");
     camera_info_manager_ =
       std::make_unique<camera_info_manager::CameraInfoManager>(this, camera_name_);
-    auto camera_info_url =
-      this->declare_parameter("camera_info_url", "package://hik_camera/config/camera_6mm_MV-CS016-10UC.yaml");
-    if (camera_info_manager_->validateURL(camera_info_url)) {
-      camera_info_manager_->loadCameraInfo(camera_info_url);
-      camera_info_msg_ = camera_info_manager_->getCameraInfo();
-    } else {
-      RCLCPP_WARN(this->get_logger(), "Invalid camera info URL: %s", camera_info_url.c_str());
-    }
 
     params_callback_handle_ = this->add_on_set_parameters_callback(
       std::bind(&HikCameraNode::parametersCallback, this, std::placeholders::_1));

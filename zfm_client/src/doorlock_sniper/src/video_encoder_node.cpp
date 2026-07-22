@@ -4,7 +4,8 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
-#include <cstring>  // 为 memcpy/memset
+#include <cmath>
+#include <cstring>  // memcpy/memset
 #include <filesystem>
 #include <iomanip>
 #include <sstream>
@@ -18,9 +19,9 @@ VideoEncoderNode::VideoEncoderNode(const rclcpp::NodeOptions & options)
   appsrc_(nullptr),
   appsink_(nullptr),
   bus_(nullptr),
-  packet_sequence_id_(0),    // 初始化顺序与声明一致
+  packet_sequence_id_(0),
   frame_count_(0),
-  display_running_(false)    // 最后初始化
+  display_running_(false)
 {
   constexpr int kVideoPacketBytes = 150;
 
@@ -36,9 +37,23 @@ VideoEncoderNode::VideoEncoderNode(const rclcpp::NodeOptions & options)
   param_motion_dilate_px_ = this->declare_parameter("motion_dilate_px", 2);
   param_motion_trail_frames_ = this->declare_parameter("motion_trail_frames", 3);
   param_trail_disable_motion_ratio_ = this->declare_parameter("trail_disable_motion_ratio", 0.30);
+  param_shake_compensation_enable_ = this->declare_parameter("shake_compensation_enable", true);
+  param_shake_min_response_ = this->declare_parameter("shake_min_response", 0.12);
+  param_shake_fullframe_ratio_ = this->declare_parameter("shake_fullframe_ratio", 0.60);
+  param_shake_residual_threshold_ = this->declare_parameter("shake_residual_threshold", 35);
+  param_shake_white_v_threshold_ = this->declare_parameter("shake_white_v_threshold", 150);
+  param_shake_white_s_max_ = this->declare_parameter("shake_white_s_max", 100);
+  param_shake_green_g_threshold_ = this->declare_parameter("shake_green_g_threshold", 100);
+  param_shake_green_margin_ = this->declare_parameter("shake_green_margin", 20);
+  param_shake_recover_frames_ = this->declare_parameter("shake_recover_frames", 8);
   param_bg_update_alpha_ = this->declare_parameter("bg_update_alpha", 0.01);
   param_bg_blur_sigma_ = this->declare_parameter("bg_blur_sigma", 1.2);
   param_center_clear_size_ = this->declare_parameter("center_clear_size", 100);
+  param_armor_edge_enable_ = this->declare_parameter("armor_edge_enable", true);
+  param_armor_edge_roi_size_ = this->declare_parameter("armor_edge_roi_size", 180);
+  param_armor_dark_threshold_ = this->declare_parameter("armor_dark_threshold", 28);
+  param_armor_edge_threshold_ = this->declare_parameter("armor_edge_threshold", 45);
+  param_armor_edge_dilate_px_ = this->declare_parameter("armor_edge_dilate_px", 1);
   param_force_monochrome_ = this->declare_parameter("force_monochrome", false);
   param_bandwidth_limit_kbytes_ = this->declare_parameter("bandwidth_limit_kbytes", 7.0);
   param_bandwidth_window_s_ = this->declare_parameter("bandwidth_window_s", 2.0);
@@ -100,7 +115,29 @@ VideoEncoderNode::VideoEncoderNode(const rclcpp::NodeOptions & options)
       param_trail_disable_motion_ratio_);
     param_trail_disable_motion_ratio_ = 1.0;
   }
-
+  param_shake_min_response_ = std::clamp(param_shake_min_response_, 0.0, 1.0);
+  param_shake_fullframe_ratio_ = std::clamp(param_shake_fullframe_ratio_, 0.0, 1.0);
+  param_shake_residual_threshold_ = std::clamp(param_shake_residual_threshold_, 0, 255);
+  param_shake_white_v_threshold_ = std::clamp(param_shake_white_v_threshold_, 0, 255);
+  param_shake_white_s_max_ = std::clamp(param_shake_white_s_max_, 0, 255);
+  param_shake_green_g_threshold_ = std::clamp(param_shake_green_g_threshold_, 0, 255);
+  param_shake_green_margin_ = std::clamp(param_shake_green_margin_, 0, 255);
+  if (param_shake_recover_frames_ < 0) {
+    RCLCPP_WARN(
+      this->get_logger(), "shake_recover_frames=%d invalid, clamp to 0",
+      param_shake_recover_frames_);
+    param_shake_recover_frames_ = 0;
+  }
+  if (param_shake_recover_frames_ > 60) {
+    RCLCPP_WARN(
+      this->get_logger(), "shake_recover_frames=%d too high, clamp to 60",
+      param_shake_recover_frames_);
+    param_shake_recover_frames_ = 60;
+  }
+  param_armor_edge_roi_size_ = std::clamp(param_armor_edge_roi_size_, 0, param_output_size_);
+  param_armor_dark_threshold_ = std::clamp(param_armor_dark_threshold_, 0, 255);
+  param_armor_edge_threshold_ = std::clamp(param_armor_edge_threshold_, 0, 255);
+  param_armor_edge_dilate_px_ = std::clamp(param_armor_edge_dilate_px_, 0, 8);
   if (param_motion_erode_px_ < 0) {
     RCLCPP_WARN(
       this->get_logger(), "motion_erode_px=%d invalid, clamp to 0",
@@ -200,13 +237,20 @@ VideoEncoderNode::VideoEncoderNode(const rclcpp::NodeOptions & options)
 
   RCLCPP_INFO(this->get_logger(), 
     "VideoEncoderNode: crop=%d -> %dx%d@%dfps %dkbps, packets=%dbytes, static_simplify=%s, "
-    "motion_open(y=%d,x=%d), trail=%df disable@%.0f%% mono=%s, "
+    "motion_open(y=%d,x=%d), trail=%df disable@%.0f%% shake_comp=%s resp>=%.2f "
+    "full@%.0f%% res=%d white(v>%d,s<%d) green(g>%d,+%d) armor=%s roi=%d dark<%d edge>%d mono=%s, "
     "tx_limit=%.2fkB/s@%.2fs max_delay=%.2fs x264_preset=%s",
     param_crop_size_, param_output_size_, param_output_size_,
     param_output_fps_, param_target_bitrate_, param_packet_size_,
     param_static_simplify_ ? "on" : "off",
     param_motion_erode_px_, param_motion_dilate_px_,
     param_motion_trail_frames_, param_trail_disable_motion_ratio_ * 100.0,
+    param_shake_compensation_enable_ ? "on" : "off",
+    param_shake_min_response_, param_shake_fullframe_ratio_ * 100.0,
+    param_shake_residual_threshold_, param_shake_white_v_threshold_, param_shake_white_s_max_,
+    param_shake_green_g_threshold_, param_shake_green_margin_,
+    param_armor_edge_enable_ ? "on" : "off", param_armor_edge_roi_size_,
+    param_armor_dark_threshold_, param_armor_edge_threshold_,
     param_force_monochrome_ ? "on" : "off",
     param_bandwidth_limit_kbytes_, param_bandwidth_window_s_, param_max_tx_delay_s_,
     param_x264_preset_.c_str());
@@ -290,7 +334,7 @@ void VideoEncoderNode::initialize_gstreamer()
       "speed-preset", speed_preset,
       "tune", 0,                  // no tuning, favor efficiency
       "byte-stream", TRUE,
-      "key-int-max", key_int,     // 减少 I 帧开销
+      "key-int-max", key_int,     // reduce I-frame overhead
       "bframes", 4,
       "rc-lookahead", 40,
       "sync-lookahead", 20,
@@ -319,7 +363,7 @@ void VideoEncoderNode::initialize_gstreamer()
       nullptr);
   }
 
-  // 确保下游看到可流式重组的 Annex-B 字节流，并周期重复 SPS/PPS
+  // Emit a streamable Annex-B byte stream and repeat SPS/PPS for decoder recovery.
   g_object_set(
     G_OBJECT(parser),
     "config-interval", -1,
@@ -407,17 +451,62 @@ cv::Mat VideoEncoderNode::preprocess_image(
   cv::cvtColor(working, gray, cv::COLOR_BGR2GRAY);
   if (background_gray_f32_.empty()) {
     gray.convertTo(background_gray_f32_, CV_32F);
+    gray.copyTo(last_gray_u8_);
     return working;
   }
 
   cv::Mat bg_u8;
   cv::convertScaleAbs(background_gray_f32_, bg_u8);
 
+  cv::Point2d global_shift(0.0, 0.0);
+  double global_motion_px = 0.0;
+  if (param_shake_compensation_enable_ && !last_gray_u8_.empty()) {
+    cv::Mat prev_small;
+    cv::Mat curr_small;
+    const cv::Size small_size(
+      std::max(16, gray.cols / 4),
+      std::max(16, gray.rows / 4));
+    cv::resize(last_gray_u8_, prev_small, small_size, 0, 0, cv::INTER_AREA);
+    cv::resize(gray, curr_small, small_size, 0, 0, cv::INTER_AREA);
+    prev_small.convertTo(prev_small, CV_32F);
+    curr_small.convertTo(curr_small, CV_32F);
+    double response = 0.0;
+    global_shift = cv::phaseCorrelate(prev_small, curr_small, cv::noArray(), &response);
+    if (response >= param_shake_min_response_) {
+      global_shift.x *= static_cast<double>(gray.cols) / static_cast<double>(small_size.width);
+      global_shift.y *= static_cast<double>(gray.rows) / static_cast<double>(small_size.height);
+      global_motion_px = std::hypot(global_shift.x, global_shift.y);
+    } else {
+      global_shift = cv::Point2d(0.0, 0.0);
+    }
+  }
+
+  cv::Mat bg_aligned = bg_u8;
+  cv::Mat prev_aligned = last_gray_u8_;
+  if (param_shake_compensation_enable_ && global_motion_px > 0.01) {
+    const cv::Mat affine = (cv::Mat_<double>(2, 3) <<
+      1.0, 0.0, global_shift.x,
+      0.0, 1.0, global_shift.y);
+    cv::warpAffine(
+      bg_u8, bg_aligned, affine, bg_u8.size(),
+      cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+    cv::warpAffine(
+      last_gray_u8_, prev_aligned, affine, last_gray_u8_.size(),
+      cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+  }
+
   cv::Mat diff;
-  cv::absdiff(gray, bg_u8, diff);
+  cv::absdiff(gray, bg_aligned, diff);
+
+  cv::Mat raw_motion_mask;
+  cv::threshold(diff, raw_motion_mask, param_motion_threshold_, 255, cv::THRESH_BINARY);
+  const double raw_motion_ratio =
+    static_cast<double>(cv::countNonZero(raw_motion_mask)) /
+    static_cast<double>(raw_motion_mask.total());
+  const bool fullframe_shake = (raw_motion_ratio >= param_shake_fullframe_ratio_);
 
   cv::Mat motion_mask;
-  cv::threshold(diff, motion_mask, param_motion_threshold_, 255, cv::THRESH_BINARY);
+  motion_mask = raw_motion_mask.clone();
   if (param_motion_erode_px_ > 0) {
     if (motion_erode_kernel_.empty()) {
       const int k = 2 * param_motion_erode_px_ + 1;
@@ -434,19 +523,14 @@ cv::Mat VideoEncoderNode::preprocess_image(
     }
     cv::dilate(motion_mask, motion_mask, motion_dilate_kernel_, cv::Point(-1, -1), 1);
   }
-  const double motion_ratio_raw =
-    static_cast<double>(cv::countNonZero(motion_mask)) / static_cast<double>(motion_mask.total());
-  const bool suppress_trail = (motion_ratio_raw >= param_trail_disable_motion_ratio_);
-
-  // 中心区域保护：不做静态模糊
-  if (param_center_clear_size_ > 0) {
-    const int clear_size = std::min({param_center_clear_size_, working.cols, working.rows});
-    const int x0 = std::max(0, working.cols / 2 - clear_size / 2);
-    const int y0 = std::max(0, working.rows / 2 - clear_size / 2);
-    const int cw = std::min(clear_size, working.cols - x0);
-    const int ch = std::min(clear_size, working.rows - y0);
-    cv::rectangle(motion_mask, cv::Rect(x0, y0, cw, ch), cv::Scalar(255), cv::FILLED);
+  const bool global_residual = fullframe_shake;
+  const bool shake = fullframe_shake;
+  if (shake) {
+    shake_recover_frames_left_ = param_shake_recover_frames_;
+  } else if (shake_recover_frames_left_ > 0) {
+    --shake_recover_frames_left_;
   }
+
 
   cv::Mat static_base = working.clone();
   if (!param_force_monochrome_ && param_target_bitrate_ <= 80) {
@@ -463,15 +547,140 @@ cv::Mat VideoEncoderNode::preprocess_image(
     std::max(0.0, param_bg_blur_sigma_));
 
   cv::Mat focused = blurred_static.clone();
-  working.copyTo(focused, motion_mask);
+  if (!global_residual) {
+    working.copyTo(focused, motion_mask);
+  }
   if (static_removed) {
     focused.copyTo(*static_removed);
   }
 
-  // 运动拖影：简单时域 max（当前+历史N帧），仅作用在运动区域联合掩码
+  cv::Mat trail_input_mask = motion_mask.clone();
+  bool push_trail_this_frame = true;
+  if (shake) {
+    cv::Mat residual;
+    cv::absdiff(gray, prev_aligned, residual);
+    cv::Mat strong_residual_mask;
+    cv::threshold(
+      residual, strong_residual_mask, param_shake_residual_threshold_, 255, cv::THRESH_BINARY);
+
+    cv::Mat hsv;
+    cv::cvtColor(working, hsv, cv::COLOR_BGR2HSV);
+    cv::Mat white_mask;
+    cv::inRange(
+      hsv,
+      cv::Scalar(0, 0, param_shake_white_v_threshold_),
+      cv::Scalar(179, param_shake_white_s_max_, 255),
+      white_mask);
+
+    std::vector<cv::Mat> bgr_channels;
+    cv::split(working, bgr_channels);
+    cv::Mat green_min_mask;
+    cv::Mat green_over_red_mask;
+    cv::Mat green_over_blue_mask;
+    cv::Mat red_plus_margin;
+    cv::Mat blue_plus_margin;
+    cv::add(bgr_channels[2], cv::Scalar(param_shake_green_margin_), red_plus_margin);
+    cv::add(bgr_channels[0], cv::Scalar(param_shake_green_margin_), blue_plus_margin);
+    cv::compare(
+      bgr_channels[1], cv::Scalar(param_shake_green_g_threshold_), green_min_mask, cv::CMP_GT);
+    cv::compare(bgr_channels[1], red_plus_margin, green_over_red_mask, cv::CMP_GT);
+    cv::compare(bgr_channels[1], blue_plus_margin, green_over_blue_mask, cv::CMP_GT);
+    cv::Mat green_mask;
+    cv::bitwise_and(green_min_mask, green_over_red_mask, green_mask);
+    cv::bitwise_and(green_mask, green_over_blue_mask, green_mask);
+
+    cv::Mat projectile_prior_mask;
+    cv::bitwise_or(strong_residual_mask, white_mask, projectile_prior_mask);
+    cv::bitwise_or(projectile_prior_mask, green_mask, projectile_prior_mask);
+    cv::bitwise_and(motion_mask, projectile_prior_mask, trail_input_mask);
+    push_trail_this_frame = (cv::countNonZero(trail_input_mask) > 0);
+  }
+
+  if (param_center_clear_size_ > 0) {
+    cv::Mat sharp;
+    cv::GaussianBlur(working, sharp, cv::Size(), 0.8, 0.8);
+    cv::addWeighted(working, 1.35, sharp, -0.35, 0.0, sharp);
+
+    const int effective_clear_size =
+      std::max(1, std::min({param_center_clear_size_, working.cols, working.rows}));
+    if (center_weight_bgr_f32_.empty() ||
+      center_weight_cached_size_ != working.size() ||
+      center_weight_cached_clear_size_ != effective_clear_size)
+    {
+      cv::Mat center_weight(gray.size(), CV_32F);
+      const double radius = static_cast<double>(effective_clear_size) * 0.5;
+      const double sigma = std::max(1.0, radius * 0.65);
+      for (int yy = 0; yy < center_weight.rows; ++yy) {
+        float * row = center_weight.ptr<float>(yy);
+        const double dy = static_cast<double>(yy - center_weight.rows / 2);
+        for (int xx = 0; xx < center_weight.cols; ++xx) {
+          const double dx = static_cast<double>(xx - center_weight.cols / 2);
+          row[xx] = static_cast<float>(std::exp(-(dx * dx + dy * dy) / (2.0 * sigma * sigma)));
+        }
+      }
+      cv::merge(
+        std::vector<cv::Mat>{center_weight, center_weight, center_weight},
+        center_weight_bgr_f32_);
+      center_weight_cached_size_ = working.size();
+      center_weight_cached_clear_size_ = effective_clear_size;
+    }
+    cv::Mat inv_weight_bgr = cv::Scalar::all(1.0) - center_weight_bgr_f32_;
+    cv::Mat focused_f32;
+    cv::Mat sharp_f32;
+    focused.convertTo(focused_f32, CV_32F);
+    sharp.convertTo(sharp_f32, CV_32F);
+    focused_f32 = focused_f32.mul(inv_weight_bgr) + sharp_f32.mul(center_weight_bgr_f32_);
+    focused_f32.convertTo(focused, CV_8U);
+  } else {
+    center_weight_bgr_f32_.release();
+    center_weight_cached_size_ = cv::Size();
+    center_weight_cached_clear_size_ = -1;
+  }
+
+  if (param_armor_edge_enable_ && param_armor_edge_roi_size_ > 0) {
+    const int roi_size = std::min({param_armor_edge_roi_size_, working.cols, working.rows});
+    const int x0 = std::max(0, working.cols / 2 - roi_size / 2);
+    const int y0 = std::max(0, working.rows / 2 - roi_size / 2);
+    const int rw = std::min(roi_size, working.cols - x0);
+    const int rh = std::min(roi_size, working.rows - y0);
+    const cv::Rect roi(x0, y0, rw, rh);
+
+    cv::Mat gray_roi = gray(roi);
+    cv::Mat dark_mask;
+    cv::threshold(
+      gray_roi, dark_mask, param_armor_dark_threshold_, 255, cv::THRESH_BINARY_INV);
+
+    cv::Mat grad_x;
+    cv::Mat grad_y;
+    cv::Mat abs_grad_x;
+    cv::Mat abs_grad_y;
+    cv::Mat grad;
+    cv::Sobel(gray_roi, grad_x, CV_16S, 1, 0, 3);
+    cv::Sobel(gray_roi, grad_y, CV_16S, 0, 1, 3);
+    cv::convertScaleAbs(grad_x, abs_grad_x);
+    cv::convertScaleAbs(grad_y, abs_grad_y);
+    cv::addWeighted(abs_grad_x, 0.5, abs_grad_y, 0.5, 0.0, grad);
+
+    cv::Mat edge_mask;
+    cv::threshold(grad, edge_mask, param_armor_edge_threshold_, 255, cv::THRESH_BINARY);
+
+    if (param_armor_edge_dilate_px_ > 0) {
+      const int k = 2 * param_armor_edge_dilate_px_ + 1;
+      cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(k, k));
+      cv::dilate(dark_mask, dark_mask, kernel, cv::Point(-1, -1), 1);
+    }
+
+    cv::Mat armor_edge_mask;
+    cv::bitwise_and(edge_mask, dark_mask, armor_edge_mask);
+    working(roi).copyTo(focused(roi), armor_edge_mask);
+  }
+
+  // Restore the original trail behavior: max real pixels from recent motion masks.
   if (param_motion_trail_frames_ > 0) {
-    motion_mask_history_.push_back(motion_mask.clone());
-    trail_frame_history_.push_back(working.clone());
+    if (push_trail_this_frame) {
+      motion_mask_history_.push_back(trail_input_mask.clone());
+      trail_frame_history_.push_back(working.clone());
+    }
     const size_t max_history = static_cast<size_t>(param_motion_trail_frames_ + 1);
     while (motion_mask_history_.size() > max_history) {
       motion_mask_history_.pop_front();
@@ -481,10 +690,10 @@ cv::Mat VideoEncoderNode::preprocess_image(
     }
 
     const size_t history_size = motion_mask_history_.size();
-    if (!suppress_trail && history_size > 1 && history_size == trail_frame_history_.size()) {
-      cv::Mat trail_mask = motion_mask.clone();
+    if (history_size > 0 && history_size == trail_frame_history_.size()) {
+      cv::Mat trail_mask = cv::Mat::zeros(gray.size(), CV_8U);
       cv::Mat trail_img = working.clone();
-      for (size_t i = 0; i < history_size - 1; ++i) {
+      for (size_t i = 0; i < history_size; ++i) {
         cv::bitwise_or(trail_mask, motion_mask_history_[i], trail_mask);
         cv::max(trail_img, trail_frame_history_[i], trail_img);
       }
@@ -495,14 +704,19 @@ cv::Mat VideoEncoderNode::preprocess_image(
     trail_frame_history_.clear();
   }
 
-  cv::accumulateWeighted(gray, background_gray_f32_, std::clamp(param_bg_update_alpha_, 0.001, 0.2));
+  const double bg_alpha = (shake || shake_recover_frames_left_ > 0) ?
+    0.0 : std::clamp(param_bg_update_alpha_, 0.001, 0.2);
+  if (bg_alpha > 0.0) {
+    cv::accumulateWeighted(gray, background_gray_f32_, bg_alpha);
+  }
+  gray.copyTo(last_gray_u8_);
   return focused;
 }
 
 void VideoEncoderNode::image_callback(const sensor_msgs::msg::Image::SharedPtr msg)
 {
   try {
-    // 仅在明确要求低于 60fps 时做抽帧；60fps 模式不主动丢帧
+    // Drop camera frames only when the requested output FPS is below 60.
     if (param_output_fps_ < 60) {
       const int64_t stamp_ns = rclcpp::Time(msg->header.stamp).nanoseconds();
       const int64_t frame_interval_ns = 1000000000LL / std::max(param_output_fps_, 1);
@@ -565,7 +779,7 @@ void VideoEncoderNode::push_frame_to_gstreamer(const cv::Mat & frame)
   gst_buffer_unref(buffer);
 }
 
-// 150B 分包 + 带宽窗口限速 + 队列时延上限
+// 150B packetization + sliding-window bandwidth limit + queue delay cap.
 void VideoEncoderNode::pull_stream_and_packetize()
 {
   if (!appsink_) return;
@@ -591,12 +805,12 @@ void VideoEncoderNode::pull_stream_and_packetize()
     if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
       std::lock_guard<std::mutex> lock(buffer_mutex_);
 
-      // 追加到流缓冲区
+      // Append encoded bytes to the stream buffer.
       size_t old_size = stream_buffer_.size();
       stream_buffer_.resize(old_size + map.size);
       memcpy(stream_buffer_.data() + old_size, map.data, map.size);
 
-      // 2秒滑动窗口硬限速：任何窗口内总字节不超过 window_limit_bytes
+      // Hard sliding-window limit: total bytes in the window never exceed window_limit_bytes.
       while (stream_buffer_.size() >= packet_bytes) {
         const int64_t now_ns = this->now().nanoseconds();
         while (!sent_window_.empty() && (now_ns - sent_window_.front().first) > window_ns) {
@@ -625,12 +839,12 @@ void VideoEncoderNode::pull_stream_and_packetize()
         stream_buffer_.resize(stream_buffer_.size() - param_packet_size_);
       }
 
-      // 排队时延上限：防止突发造成长延时。超限时丢弃旧数据。
+      // Clip old queued bytes if encoder output exceeds the allowed transmit delay.
       if (stream_buffer_.size() > max_backlog_bytes) {
         const size_t target_drop = stream_buffer_.size() - max_backlog_bytes;
         size_t drop_bytes = target_drop;
 
-        // 尽量对齐到下一个 Annex-B 起始码，减少解码错误持续时间
+        // Align to the next Annex-B start code where possible to shorten decoder recovery.
         for (size_t i = target_drop; i + 4 < stream_buffer_.size(); ++i) {
           const bool start_code_3 = (stream_buffer_[i] == 0 && stream_buffer_[i + 1] == 0 &&
                                      stream_buffer_[i + 2] == 1);
