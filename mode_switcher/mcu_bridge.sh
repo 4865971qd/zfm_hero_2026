@@ -1,9 +1,9 @@
 #!/bin/bash
 #
-# MCU 串口桥接 — 开机自启，独占 /dev/ttyACM0。
+# MCU 串口桥接 — 开机自启，独占 /dev/ttyACM1。
 #
 # 做什么：
-#   1. 打开 /dev/ttyACM0 @115200
+#   1. 打开 /dev/ttyACM1 @115200
 #   2. 创建虚拟串口 /tmp/ttyACM_mcu（自瞄项目通过它和 MCU 通信）
 #   3. 双向透明转发所有数据
 #   4. 解析 MCU 发来的 16 字节包，提取 mode 字节写入 /tmp/mcu_mode

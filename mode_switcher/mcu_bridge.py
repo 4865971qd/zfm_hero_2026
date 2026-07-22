@@ -1,234 +1,189 @@
 #!/usr/bin/env python3
 """
-MCU 串口桥接 — 独占 /dev/ttyACM0，创建虚拟串口给自瞄项目用。
-
-功能:
-  1. 打开真实串口 /dev/ttyACM0 @115200 8N1
-  2. 创建 PTY 对，slave 端 symlink 到 /tmp/ttyACM_mcu
-  3. 双向转发: MCU ↔ 自瞄（透明透传，不丢字节）
-  4. 解析 MCU→PC 的 16 字节定长包，提取 mode 字节写入 /tmp/mcu_mode
-  5. 24小时运行，不受 ROS 崩溃影响
-
-运行方式:
-  python3 mcu_bridge.py
-  或 systemd 开机自启
+MCU 串口桥接 — 读取 MCU 数据，提取 mode，双向转发（非阻塞写）。
 """
-import os
-import sys
-import time
-import struct
-import select
-import signal
-import threading
-import termios
-import tty
+import os, time, select, pty, glob, sys, fcntl
 
-# ============================================================================
-# 配置
-# ============================================================================
-REAL_SERIAL = "/dev/ttyACM0"
 BAUDRATE = 115200
 VIRTUAL_LINK = "/tmp/ttyACM_mcu"
 MODE_FILE = "/tmp/mcu_mode"
-
-# 串口协议常量（与 autoaim FixedPacket<16> 一致）
 PACKET_SIZE = 16
 PACKET_HEADER = 0xFF
 PACKET_TAIL = 0x0D
-MODE_OFFSET = 14  # mode_flag 字节在包里的位置（系统级模式切换）
-
-# ============================================================================
-# 串口初始化
-# ============================================================================
-
-def open_real_serial(path: str, baudrate: int):
-    """打开真实串口，配置为 raw 模式 8N1"""
-    import serial as pyserial
-
-    ser = pyserial.Serial(
-        port=path,
-        baudrate=baudrate,
-        bytesize=pyserial.EIGHTBITS,
-        parity=pyserial.PARITY_NONE,
-        stopbits=pyserial.STOPBITS_ONE,
-        timeout=0.01,  # 10ms 超时，保证 select 不会卡死
-    )
-    # 清空缓冲区
-    ser.reset_input_buffer()
-    ser.reset_output_buffer()
-    return ser
+MODE_OFFSET = 14
+RX_REPORT_GATE = 0
 
 
-def create_pty():
-    """创建 PTY 对，返回 (master_fd, slave_path)"""
-    import pty as _pty
-    master_fd, slave_fd = _pty.openpty()
-    # 设置 slave 为 raw 模式（和串口行为一致）
-    attr = termios.tcgetattr(slave_fd)
-    attr.c_iflag &= ~(termios.BRGINT | termios.ICRNL | termios.INPCK | termios.ISTRIP | termios.IXON)
-    attr.c_oflag &= ~(termios.OPOST)
-    attr.c_cflag |= (termios.CS8)
-    attr.c_lflag &= ~(termios.ECHO | termios.ECHONL | termios.ICANON | termios.ISIG | termios.IEXTEN)
-    attr.c_cc[termios.VMIN] = 1
-    attr.c_cc[termios.VTIME] = 0
-    termios.tcsetattr(slave_fd, termios.TCSANOW, attr)
-    os.close(slave_fd)  # 我们只用 master_fd 来读写，slave 由自瞄打开
-
-    slave_path = os.ttyname(master_fd).replace("/ptm", "/pts")
-    # pty.openpty 返回的 slave fd 路径需要在 /dev/pts/ 里找
-    import fcntl
-    import pty as _pty2
-    # 更可靠的方式：用 ptsname
-    slave_name = os.ttyname(slave_fd) if 'slave_fd' in dir() else None
-
-    return master_fd, slave_path
+def log(msg):
+    print(f"[bridge] {msg}", flush=True)
 
 
-def create_pty_v2():
-    """创建 PTY 对，返回 (master_fd, slave_path) — 更可靠的方法"""
-    import pty
+def setup_pty():
     master_fd, slave_fd = pty.openpty()
     slave_path = os.ttyname(slave_fd)
-    os.close(slave_fd)
-    return master_fd, slave_path
+    if os.path.lexists(VIRTUAL_LINK):
+        os.unlink(VIRTUAL_LINK)
+    os.symlink(slave_path, VIRTUAL_LINK)
+    return master_fd, slave_fd
 
 
-# ============================================================================
-# 协议解析
-# ============================================================================
-
-class PacketParser:
-    """从字节流中提取 16 字节定长包，只解析 mode"""
-
-    def __init__(self):
-        self._buf = bytearray()
-
-    def feed(self, data: bytes) -> int | None:
-        """喂入字节，返回最新解析出的 mode 值（一次处理完所有积压的包），或 None"""
-        self._buf.extend(data)
-        result = None
-
-        while len(self._buf) >= PACKET_SIZE:
-            # 查找帧头 0xFF
-            head_idx = self._buf.find(PACKET_HEADER)
-            if head_idx < 0:
-                self._buf.clear()
-                return result
-            if head_idx > 0:
-                del self._buf[:head_idx]
-
-            if len(self._buf) < PACKET_SIZE:
-                return result
-
-            # 验证帧尾 0x0D
-            if self._buf[PACKET_SIZE - 1] != PACKET_TAIL:
-                # 帧尾不对，跳过这一字节重新找头
-                del self._buf[0]
-                continue
-
-            # 提取 mode，继续循环以处理所有积压包，返回最新的 mode
-            result = self._buf[MODE_OFFSET]
-            del self._buf[:PACKET_SIZE]
-
-        return result
-
-
-# ============================================================================
-# 主循环
-# ============================================================================
-
-def write_mode_file(mode: int):
-    """原子写入 mode 文件"""
+def write_mode(val):
     try:
         with open(MODE_FILE + ".tmp", "w") as f:
-            f.write(str(mode))
+            f.write(str(val))
         os.rename(MODE_FILE + ".tmp", MODE_FILE)
-    except OSError:
+    except Exception as e:
+        log(f"WRITE FAIL: {e}")
+
+
+class Parser:
+    def __init__(self):
+        self._buf = bytearray()
+    def feed(self, data):
+        self._buf.extend(data)
+        r = None
+        while len(self._buf) >= PACKET_SIZE:
+            h = self._buf.find(PACKET_HEADER)
+            if h < 0: self._buf.clear(); return r
+            if h > 0: del self._buf[:h]
+            if len(self._buf) < PACKET_SIZE: return r
+            if self._buf[PACKET_SIZE-1] != PACKET_TAIL:
+                del self._buf[0]; continue
+            r = self._buf[MODE_OFFSET]
+            del self._buf[:PACKET_SIZE]
+        return r
+
+
+def open_acm(dev):
+    import serial
+    try:
+        ser = serial.Serial(dev, BAUDRATE, timeout=0.05)
+        ser.reset_input_buffer()
+        ser.reset_output_buffer()
+        # 设为非阻塞写，防止视频数据太多时卡住
+        fl = fcntl.fcntl(ser.fd, fcntl.F_GETFL)
+        fcntl.fcntl(ser.fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+        log(f"Opened {dev}")
+        return ser
+    except Exception as e:
+        log(f"Failed {dev}: {e}")
+        return None
+
+
+def try_write(ser, data, label):
+    """非阻塞写串口，失败静默忽略"""
+    try:
+        ser.write(data)
+    except (BlockingIOError, OSError):
         pass
+    except Exception:
+        log(f"Write err {label}")
 
 
 def main():
-    print(f"[mcu_bridge] Starting...")
-    print(f"[mcu_bridge] Real serial: {REAL_SERIAL} @ {BAUDRATE}")
-    print(f"[mcu_bridge] Virtual link: {VIRTUAL_LINK}")
+    log("Starting...")
+    master_fd, slave_fd = setup_pty()
+    fl = fcntl.fcntl(master_fd, fcntl.F_GETFL)
+    fcntl.fcntl(master_fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+    write_mode(0)
+    log(f"PTY: {VIRTUAL_LINK} ready")
 
-    # 打开真实串口
-    ser = open_real_serial(REAL_SERIAL, BAUDRATE)
-    print(f"[mcu_bridge] Opened {REAL_SERIAL}")
-
-    # 创建 PTY 对
-    master_fd, slave_path = create_pty_v2()
-    print(f"[mcu_bridge] PTY created: master_fd={master_fd}, slave={slave_path}")
-
-    # 创建 /tmp/ttyACM_mcu 符号链接
-    if os.path.exists(VIRTUAL_LINK):
-        os.unlink(VIRTUAL_LINK)
-    os.symlink(slave_path, VIRTUAL_LINK)
-    print(f"[mcu_bridge] Symlink: {VIRTUAL_LINK} -> {slave_path}")
-
-    # 写入初始 mode = 0
-    write_mode_file(0)
-
-    parser = PacketParser()
-    running = True
-
-    def shutdown(sig, frame):
-        nonlocal running
-        running = False
-
-    signal.signal(signal.SIGINT, shutdown)
-    signal.signal(signal.SIGTERM, shutdown)
-
+    sers = {}
+    parser = Parser()
     last_mode = 0
-    total_bytes_m2p = 0  # MCU → PC
-    total_bytes_p2m = 0  # PC → MCU
+    last_hb = 0
+    global RX_REPORT_GATE
+    pty_tx = 0
+    pty_rx = 0
 
-    print(f"[mcu_bridge] Running. Forwarding MCU <-> {VIRTUAL_LINK}")
+    while True:
+        now = time.time()
+        if now - last_hb > 30:
+            last_hb = now
+            log(f"♥ ports={list(sers.keys())} mode={last_mode} tx={pty_tx} rx={pty_rx}")
 
-    while running:
         try:
-            # select 同时监听两个方向
-            rlist = [ser.fileno(), master_fd]
-            readable, _, _ = select.select(rlist, [], [], 0.1)
+            # 扫描 ACM
+            for dev in sorted(glob.glob("/dev/ttyACM*")):
+                if dev not in sers:
+                    ser = open_acm(dev)
+                    if ser:
+                        sers[dev] = ser
 
-            for fd in readable:
-                if fd == ser.fileno():
-                    # MCU → PTY
-                    data = ser.read(ser.in_waiting or 1)
+            fds = []
+            fd_map = {}
+            for name, ser in list(sers.items()):
+                try:
+                    fd = ser.fileno()
+                    fds.append(fd)
+                    fd_map[fd] = (name, ser)
+                except Exception:
+                    sers.pop(name, None)
+
+            # 也监控 PTY 主端
+            fds.append(master_fd)
+
+            if not sers:
+                time.sleep(1)
+                continue
+
+            rd, _, _ = select.select(fds, [], [], 0.5)
+
+            for fd in rd:
+                if fd == master_fd:
+                    # PTY → MCU（非阻塞转发）
+                    try:
+                        data = os.read(master_fd, 4096)
+                        pty_rx += len(data)
+                    except OSError:
+                        # 从端没打开，睡一下让出时间给串口
+                        time.sleep(0.05)
+                        continue
                     if data:
-                        total_bytes_m2p += len(data)
-                        # 解析 mode（必须在 PTY write 之前，否则 PTY write 失败时 parser 被跳过）
-                        mode = parser.feed(data)
-                        if mode is not None and mode != last_mode:
-                            print(f"[mcu_bridge] Mode: {last_mode} -> {mode}")
-                            write_mode_file(mode)
-                            last_mode = mode
-                        # 转发到 PTY（没人读时可能失败，不影响 mode 解析）
+                        for name, ser in list(sers.items()):
+                            try_write(ser, data, name)
+
+                elif fd in fd_map:
+                    name, ser = fd_map[fd]
+                    try:
+                        data = ser.read(1024)
+                    except Exception:
+                        log(f"Lost {name}")
+                        sers.pop(name)
+                        continue
+                    if data:
+                        # RX 报告（每5秒）
+                        t5 = int(time.time()) // 5
+                        if t5 != RX_REPORT_GATE:
+                            RX_REPORT_GATE = t5
+                            log(f"RX {len(data)}B from {name}")
+                        # 解析 mode
+                        m = parser.feed(data)
+                        if m is not None:
+                            # 打印每次解析到的 mode（不限于变化时）
+                            log(f"MODE={m} (last was {last_mode})")
+                            if m != last_mode:
+                                log(f"[{time.strftime('%H:%M:%S')}] Mode: {last_mode} -> {m}")
+                            write_mode(m)
+                            last_mode = m
+                        else:
+                            # 有数据但没找到有效包——打印首尾字节排查
+                            if len(data) >= 16 and data[0] == PACKET_HEADER:
+                                log(f"PKT: {data[:16].hex()}")
+                        # 转发到 PTY
                         try:
+                            pty_tx += len(data)
                             os.write(master_fd, data)
                         except OSError:
                             pass
 
-                elif fd == master_fd:
-                    # PTY → MCU
-                    data = os.read(master_fd, 4096)
-                    if data:
-                        total_bytes_p2m += len(data)
-                        ser.write(data)
-                        ser.flush()
-
-        except OSError as e:
-            print(f"[mcu_bridge] IO error: {e}", file=sys.stderr)
-            time.sleep(0.5)
         except Exception as e:
-            print(f"[mcu_bridge] Unexpected error: {e}", file=sys.stderr)
-
-    # 清理
-    ser.close()
-    os.close(master_fd)
-    if os.path.exists(VIRTUAL_LINK):
-        os.unlink(VIRTUAL_LINK)
-    print(f"[mcu_bridge] Stopped. MCU→PC: {total_bytes_m2p}B, PC→MCU: {total_bytes_p2m}B")
+            log(f"Error: {e}")
+            for ser in sers.values():
+                try: ser.close()
+                except: pass
+            sers.clear()
+            time.sleep(1)
 
 
 if __name__ == "__main__":
