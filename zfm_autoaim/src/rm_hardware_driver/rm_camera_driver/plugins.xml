@@ -1,0 +1,7 @@
+<library path="rm_camera_driver">
+    <class 
+        type="zfm::camera_driver::HikCameraNode" 
+        base_class_type="rclcpp::Node">
+        <description>HikCamera node</description>
+    </class>
+</library>

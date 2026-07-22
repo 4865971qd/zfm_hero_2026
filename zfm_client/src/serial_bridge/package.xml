@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>serial_bridge</name>
+  <version>0.1.0</version>
+  <description>Bridge VideoPacket to 0x0310 serial frames for RM image TX link</description>
+  <maintainer email="dev@example.com">dev</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>doorlock_sniper</depend>
+
+  <exec_depend>python3-serial</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

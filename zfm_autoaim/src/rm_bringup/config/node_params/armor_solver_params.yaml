@@ -1,0 +1,75 @@
+/**:
+  ros__parameters:
+    debug: true
+    target_frame: odom
+    max_armor_distance: 10.0
+
+    ekf:
+      sigma2_q_x: 0.01
+      sigma2_q_y: 0.01
+      sigma2_q_z: 0.01
+      sigma2_q_yaw: 1.0
+      sigma2_q_r: 0.1
+      sigma2_q_d_zc: 0.01
+
+      r_x: 2e-3
+      r_y: 2e-3
+      r_z: 2e-3
+      r_yaw: 2e-3
+
+      stationary_confirm_time: 0.15
+      stationary_release_time: 0.05
+      stationary_vel_threshold: 0.05
+      stationary_release_vel_threshold: 0.08
+
+    tracker:
+      max_match_distance: 0.5
+      max_match_yaw_diff: 1.0
+      radius_min: 0.23
+      radius_max: 0.34
+      default_radius: 0.26
+
+      tracking_confirm_time: 0.03
+      lost_time_thres: 0.30
+
+    solver:
+      prediction_delay: -0.005
+      controller_delay: 0.0
+      normal_max_fire_unseen_time: 0.10
+      normal_max_aim_unseen_time: 0.30
+      center_switch_confirm_time: 0.05
+      muzzle:
+        xyz: [0.095, 0.0, 0.0]
+      outpost_yaw_offset: 0.0 # 前哨站yaw偏置(度), 正值=反旋转方向
+      outpost_max_unseen_time: 0.15 # 前哨站最近真实观测最大间隔(s)
+      outpost_max_phase_error: 15.0 # 前哨站相位残差上限(度)
+      max_tracking_v_yaw: 60.0 #转速(rad/s)大于这个值时瞄准机器人中心
+      min_switching_v_yaw: 0.5 #转速(rad/s)低于此值时不引入侧向前量
+      side_angle: 45.0 # 侧向前量最大值(度), 实际前量 = clamp(|ω|·飞行时间, 0, 此值)
+      pitch_dead_zone: 0.1 # pitch死区(度), 变化小于此值不更新指令
+      yaw_dead_zone: 0.1   # yaw死区(度), 变化小于此值不更新指令
+      shooting_range_width: 0.135
+      shooting_range_height: 0.135
+      bullet_speed: 11.6
+      compensator_type: "quadratic_drag"
+      gravity: 9.6
+      # ---- Quadratic drag model (compensator_type: "quadratic_drag") ----
+      drag_coefficient: 0.2      # Cd, 工程标定值. 偏低→加大, 偏高→减小
+      air_density: 1.225           # kg/m³, 标准海平面
+      projectile_mass: 0.0445      # kg, 44.5g
+      projectile_diameter: 0.0425  # m, 42.5mm
+      # ---- Legacy resistance model (compensator_type: "resistance" "ideal") ----
+      resistance: 0.014
+      # ["距离下限, 距离上限, 高度下限, 高度下限, pitch轴补偿值 yaw轴补偿值"]
+      angle_offset: [
+        "4.0 5.0 -1.0 0.4 0.0 0.0",
+        "5.0 6.0 -1.0 0.4 0.0 0.0",
+        "5.0 6.0  0.4 0.8 0.0 0.0",
+        "5.0 6.0  0.8 1.2 0.0 0.0",
+        "6.0 7.0 -1.0 0.4 0.0 0.0",
+        "6.0 7.0  0.4 0.8 0.0 0.0",
+        "6.0 7.0  0.8 1.2 0.0 0.0",
+        "7.0 8.0 -1.0 0.4 0.0 0.0",
+        "7.0 8.0  0.4 0.8 0.0 0.0",
+        "7.0 8.0  0.8 1.2 0.0 0.0",
+      ]

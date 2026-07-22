@@ -1,0 +1,13 @@
+camera_driver:
+  ros__parameters:
+    device_index: 0           # 自瞄专用相机（第一个 USB 口）
+    camera_name: "HikCamera"
+    exposure_time: 2500.0
+    gain: 12.0
+    frame_rate: -1.0  # -1.0 = 自动使用相机最大帧率 (MV-CA016: 249fps@1440x1080)
+    camera_info_url: "package://rm_bringup/config/camera_info.yaml"
+    # 视频录制参数（默认关闭，后台线程异步写入，不影响帧率）
+    record_enable: false
+    record_path: "RMUL_Video/RMUL_record.avi"
+    record_fps: 160          # 视频文件回放帧率，应跟相机实际帧率一致
+    record_codec: "mjpg"    # ffv1=无损压缩(慢) | mjpg=有损压缩(快) | raw=原始无压缩(巨快巨占空间)
