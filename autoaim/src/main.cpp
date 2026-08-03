@@ -56,7 +56,8 @@ int main(int argc, char *argv[]) {
     // Serial port.
     autoaim::hardware::Serial serial(
         cfg["serial"]["port_name"].as<std::string>("/dev/ttyACM_mcu"),
-        cfg["serial"]["baudrate"].as<int>(115200));
+        cfg["serial"]["baudrate"].as<int>(115200),
+        cfg["serial"]["imu_time_offset_ms"].as<double>(0.0));
 
     // Core modules.
     autoaim::Detector detector(cfg);
@@ -95,10 +96,11 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        // 2. Read serial data without blocking the vision loop.
+        // 2. Query the IMU pose at the image timestamp.
         static autoaim::hardware::SerialRx last_rx;
         static bool has_rx = false;
-        bool got_rx = serial.isOpen() ? serial.receive(rx) : false;
+        autoaim::hardware::Serial::ImuSyncInfo imu_sync;
+        bool got_rx = serial.isOpen() ? serial.imuAt(t, rx, &imu_sync) : false;
         if (!got_rx && serial.isOpen()) {
             rx = last_rx;
         } else if (got_rx) {
@@ -122,9 +124,17 @@ int main(int argc, char *argv[]) {
             autoaim::getLogger()->debug(
                 "[Logic][IMU] raw_deg=({:.2f},{:.2f},{:.2f}) "
                 "solver_rad=({:.4f},{:.4f},{:.4f}) img_time={:.6f} "
-                "serial_valid={} serial_age={:.4f}",
+                "serial_valid={} serial_age={:.4f} sync_valid={} "
+                "interpolated={} clamped={} query_error_ms={:.3f} "
+                "bracket_ms={:.3f} buffer_size={}",
                 rx.roll, rx.pitch, rx.yaw, imu_roll, imu_pitch, imu_yaw,
-                img_time, has_rx ? 1 : 0, serial_age);
+                img_time, has_rx ? 1 : 0, serial_age,
+                imu_sync.valid ? 1 : 0,
+                imu_sync.interpolated ? 1 : 0,
+                imu_sync.clamped ? 1 : 0,
+                imu_sync.query_error_ms,
+                imu_sync.bracket_span_ms,
+                imu_sync.buffer_size);
         }
 
         // 4. Detect armors.

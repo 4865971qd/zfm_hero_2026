@@ -1,7 +1,7 @@
 # ============ 相机 ============
 camera:
   device_index: 0
-  exposure_time: 800.0
+  exposure_time: 2500.0
   gain: 12.0
   frame_rate: -1.0
 
@@ -110,8 +110,9 @@ solver:
 
 # ============ 串口 ============
 serial:
-  port_name: "/dev/ttyACM0"
+  port_name: "/tmp/ttyACM_mcu"
   baudrate: 115200
+  imu_time_offset_ms: 0.0
   enable_data_print: false
 
 # ============ 调试 ============
@@ -122,6 +123,6 @@ debug:
   show_selected: true        # 选中装甲板可视化 (解算瞄准的装甲板)
   enable_plotter: false       # PlotJuggler 曲线
   enable_record: false       # 视频录制
-  enable_logic_log: false     # Tracker/Solver logic diagnostics
+  enable_logic_log: true     # Tracker/Solver logic diagnostics
   record_fps: 60
   log_level: "debug"
