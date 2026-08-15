@@ -149,21 +149,53 @@ bool Solver::solveArmor(Armor &armor) {
     }
     sortPnPResult(armor, obj_pts, rvecs, tvecs);
 
-    Eigen::Vector3d xyz_cam;
-    cv::cv2eigen(tvecs[0], xyz_cam);
-    armor.xyz_in_camera = xyz_cam;
-    armor.xyz_in_gimbal = R_c2g_ * xyz_cam + t_c2g_;
-    armor.xyz_in_world = R_g2w_ * armor.xyz_in_gimbal;
+    armor.xyz_in_camera_candidates.clear();
+    armor.xyz_in_gimbal_candidates.clear();
+    armor.xyz_in_world_candidates.clear();
+    armor.ypr_in_gimbal_candidates.clear();
+    armor.ypr_in_world_candidates.clear();
+    armor.pnp_reprojection_errors.clear();
+    armor.selected_pose_idx = 0;
+    armor.pose_ambiguity = 0.0;
 
-    cv::Mat rmat;
-    cv::Rodrigues(rvecs[0], rmat);
-    Eigen::Matrix3d R_ac;
-    cv::cv2eigen(rmat, R_ac);
-    Eigen::Matrix3d R_ag = R_c2g_ * R_ac;
-    Eigen::Matrix3d R_aw = R_g2w_ * R_ag;
-    armor.ypr_in_gimbal = math::eulers(R_ag, 2, 1, 0);
-    armor.ypr_in_world = math::eulers(R_aw, 2, 1, 0);
+    const int candidate_count = std::min(rvecs.size(), tvecs.size());
+    for (int i = 0; i < candidate_count; ++i) {
+        Eigen::Vector3d xyz_cam;
+        cv::cv2eigen(tvecs[i], xyz_cam);
+        armor.xyz_in_camera_candidates.push_back(xyz_cam);
+        armor.xyz_in_gimbal_candidates.push_back(R_c2g_ * xyz_cam + t_c2g_);
+        armor.xyz_in_world_candidates.push_back(R_g2w_ * armor.xyz_in_gimbal_candidates.back());
+
+        cv::Mat rmat;
+        cv::Rodrigues(rvecs[i], rmat);
+        Eigen::Matrix3d R_ac;
+        cv::cv2eigen(rmat, R_ac);
+        Eigen::Matrix3d R_ag = R_c2g_ * R_ac;
+        Eigen::Matrix3d R_aw = R_g2w_ * R_ag;
+        armor.ypr_in_gimbal_candidates.push_back(math::eulers(R_ag, 2, 1, 0));
+        armor.ypr_in_world_candidates.push_back(math::eulers(R_aw, 2, 1, 0));
+        armor.pnp_reprojection_errors.push_back(
+            reprojectionError(obj_pts, image_pts, rvecs[i], tvecs[i]));
+    }
+
+    if (armor.xyz_in_world_candidates.empty()) {
+        getLogger()->warn("PnP candidate extraction failed");
+        return false;
+    }
+
+    armor.xyz_in_camera = armor.xyz_in_camera_candidates[0];
+    armor.xyz_in_gimbal = armor.xyz_in_gimbal_candidates[0];
+    armor.xyz_in_world = armor.xyz_in_world_candidates[0];
+    armor.ypr_in_gimbal = armor.ypr_in_gimbal_candidates[0];
+    armor.ypr_in_world = armor.ypr_in_world_candidates[0];
     armor.ypd_in_world = math::xyz2ypd(armor.xyz_in_world);
+    armor.selected_pose_idx = 0;
+    if (armor.pnp_reprojection_errors.size() >= 2) {
+        const double e0 = armor.pnp_reprojection_errors[0];
+        const double e1 = armor.pnp_reprojection_errors[1];
+        const double denom = std::max({1e-6, std::abs(e0), std::abs(e1)});
+        armor.pose_ambiguity = std::clamp(std::abs(e0 - e1) / denom, 0.0, 1.0);
+    }
     armor.distance_to_image_center =
         cv::norm(armor.center - cv::Point2f(static_cast<float>(cx_), static_cast<float>(cy_)));
     return armor.xyz_in_camera.allFinite() && armor.xyz_in_gimbal.allFinite() &&
@@ -357,7 +389,6 @@ int Solver::selectBestArmor(const std::vector<Eigen::Vector3d> &positions,
 
     int final_sel = raw_sel;
     bool held = false;
-    bool pending = false;
     double stable_dist = DBL_MAX;
     double hysteresis = 0.0;
     const int stable_before = normal_stable_idx_;
@@ -377,33 +408,6 @@ int Solver::selectBestArmor(const std::vector<Eigen::Vector3d> &positions,
             held = true;
         }
     }
-
-    constexpr int kNormalSelectConfirmFrames = 2;
-    if (stable_before >= 0 && stable_before < num &&
-        raw_sel >= 0 && raw_sel < num &&
-        raw_sel != stable_before &&
-        final_sel != stable_before) {
-        if (normal_pending_idx_ == raw_sel) {
-            ++normal_pending_frames_;
-        } else {
-            normal_pending_idx_ = raw_sel;
-            normal_pending_frames_ = 1;
-        }
-
-        if (normal_pending_frames_ < kNormalSelectConfirmFrames) {
-            final_sel = stable_before;
-            held = true;
-            pending = true;
-        } else {
-            final_sel = raw_sel;
-            normal_pending_idx_ = -1;
-            normal_pending_frames_ = 0;
-        }
-    } else {
-        normal_pending_idx_ = -1;
-        normal_pending_frames_ = 0;
-    }
-
     normal_stable_idx_ = final_sel;
     const double cell = 2 * M_PI / num;
     const double inside_cell = std::fmod(tmp, cell);
@@ -415,7 +419,6 @@ int Solver::selectBestArmor(const std::vector<Eigen::Vector3d> &positions,
     debug_info_.angular_selected_idx = angular_sel;
     debug_info_.stable_idx_before = stable_before;
     debug_info_.selection_held = held;
-    debug_info_.selection_pending = pending;
     debug_info_.near_boundary = near_boundary;
     debug_info_.select_margin = raw_dist_valid && std::isfinite(second_dist) ?
         (second_dist - raw_dist) : -1.0;
@@ -435,13 +438,13 @@ int Solver::selectBestArmor(const std::vector<Eigen::Vector3d> &positions,
             normal_select_log_sequence % 20 == 1) {
             getLogger()->debug(
                 "[Normal][SELECT] seq={} num={} selected={} raw={} angular={} "
-                "stable_before={} changed={} held={} pending={} "
+                "stable_before={} changed={} held={} "
                 "center=({:.3f},{:.3f},{:.3f}) yaw={:.3f} v_yaw={:.3f} "
                 "flight={:.4f} alpha={:.3f} decision={:.3f} theta={:.3f} "
                 "tmp={:.3f} boundary_margin_deg={:.1f} "
                 "raw_dist={:.3f} stable_dist={:.3f} hysteresis={:.3f}",
                 normal_select_log_sequence, num, final_sel, raw_sel, angular_sel,
-                stable_before, selection_changed ? 1 : 0, held ? 1 : 0, pending ? 1 : 0,
+                stable_before, selection_changed ? 1 : 0, held ? 1 : 0,
                 center.x(), center.y(), center.z(), yaw, v_yaw,
                 flying_time, alpha, dec, theta, tmp,
                 boundary_margin * 180.0 / M_PI,
@@ -506,8 +509,6 @@ GimbalCommand Solver::solve(const Target &target, double current_time) {
         has_selected_armor_ = false;
         selected_armor_index_ = -1;
         normal_stable_idx_ = -1;
-        normal_pending_idx_ = -1;
-        normal_pending_frames_ = 0;
         resetCommandDeadZone();
         return {};
     }
@@ -528,8 +529,6 @@ GimbalCommand Solver::solve(const Target &target, double current_time) {
         outpost_pending_since_ = -1.0;
         outpost_last_switch_time_ = -1.0;
         normal_stable_idx_ = -1;
-        normal_pending_idx_ = -1;
-        normal_pending_frames_ = 0;
         has_selected_armor_ = false;
         selected_armor_index_ = -1;
         resetCommandDeadZone();
@@ -548,12 +547,8 @@ GimbalCommand Solver::solve(const Target &target, double current_time) {
         outpost_pending_idx_ = -1;
         outpost_pending_since_ = -1.0;
         outpost_last_switch_time_ = -1.0;
-        normal_pending_idx_ = -1;
-        normal_pending_frames_ = 0;
     } else {
         normal_stable_idx_ = -1;
-        normal_pending_idx_ = -1;
-        normal_pending_frames_ = 0;
     }
     bool outpost_model_ok = true;
     bool outpost_prediction_ok = true;
@@ -563,8 +558,6 @@ GimbalCommand Solver::solve(const Target &target, double current_time) {
         current_time, target.normal_last_seen_time, normal_max_fire_unseen_time_);
     if (!is_outpost && !normal_model_ok) {
         normal_stable_idx_ = -1;
-        normal_pending_idx_ = -1;
-        normal_pending_frames_ = 0;
     }
     if (is_outpost) {
         double unseen_time = current_time - target.outpost_last_seen_time;
@@ -1015,3 +1008,4 @@ std::vector<cv::Point2f> Solver::reproject(const Eigen::Vector3d &xyz_world,
 }
 
 }  // namespace autoaim
+

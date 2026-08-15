@@ -314,6 +314,7 @@ int main(int argc, char *argv[]) {
             const double yaw_deg = target.state[6] * 180.0 / 3.14159265358979323846;
             const double obs_yaw_deg = track_dbg.measurement[3] * 180.0 /
                 3.14159265358979323846;
+            const double model_yaw_deg = yaw_deg;
             const double res_yaw_deg = track_dbg.residual[3] * 180.0 /
                 3.14159265358979323846;
             const double res_norm = track_dbg.residual.head<3>().norm();
@@ -324,14 +325,10 @@ int main(int argc, char *argv[]) {
                 R"({{"dist":{:.6f},"yaw":{:.6f},"v_yaw":{:.6f},)"
                 R"("imu_sync_valid":{},"imu_query_error_ms":{:.6f},"imu_bracket_ms":{:.6f},"serial_age_ms":{:.6f},)"
                 R"("obs_matched":{},"obs_x":{:.6f},"obs_y":{:.6f},"obs_z":{:.6f},"obs_yaw":{:.6f},)"
-                R"("model_cx":{:.6f},"model_cy":{:.6f},"model_z":{:.6f},"model_yaw":{:.6f},)"
-                R"("model_vx":{:.6f},"model_vy":{:.6f},"model_vz":{:.6f},"model_vyaw":{:.6f},)"
-                R"("model_r1":{:.6f},"model_r2":{:.6f},"model_dz":{:.6f},)"
-                R"("res_x":{:.6f},"res_y":{:.6f},"res_z":{:.6f},"res_yaw":{:.6f},"res_norm":{:.6f},)"
-                R"("sel_idx":{},"sel_raw_idx":{},"sel_held":{},"sel_margin":{:.6f},)"
-                R"("sel_dist":{:.6f},"sel_best_dist":{:.6f},"sel_second_dist":{:.6f},)"
-                R"("cmd_yaw":{:.6f},"cmd_pitch":{:.6f},"cmd_target_yaw":{:.6f},"cmd_target_pitch":{:.6f},)"
-                R"("fly_time":{:.6f},"fire":{}}})",
+                R"("model_x":{:.6f},"model_y":{:.6f},"model_z":{:.6f},"model_yaw":{:.6f},"model_vyaw":{:.6f},)"
+                R"("res_norm":{:.6f},"res_yaw":{:.6f},)"
+                R"("sel_idx":{},"sel_raw_idx":{},"sel_margin":{:.6f},"sel_held":{},)"
+                R"("cmd_yaw":{:.6f},"cmd_pitch":{:.6f},"fly_time":{:.6f},"fire":{}}})",
                 dist, yaw_deg, target.state[7],
                 imu_sync.valid ? 1 : 0,
                 imu_sync.query_error_ms,
@@ -345,30 +342,16 @@ int main(int argc, char *argv[]) {
                 target.state[0],
                 target.state[2],
                 target.state[4],
-                yaw_deg,
-                target.state[1],
-                target.state[3],
-                target.state[5],
+                model_yaw_deg,
                 target.state[7],
-                target.state[8],
-                target.another_r,
-                target.d_za,
-                track_dbg.residual[0],
-                track_dbg.residual[1],
-                track_dbg.residual[2],
-                res_yaw_deg,
                 res_norm,
+                res_yaw_deg,
                 solve_dbg.selected_idx,
                 solve_dbg.raw_selected_idx,
-                solve_dbg.selection_held ? 1 : 0,
                 solve_dbg.select_margin,
-                solve_dbg.selected_dist,
-                solve_dbg.best_dist,
-                solve_dbg.second_dist,
+                solve_dbg.selection_held ? 1 : 0,
                 cmd.yaw,
                 cmd.pitch,
-                solve_dbg.aim_yaw_deg,
-                solve_dbg.aim_pitch_deg,
                 solve_dbg.fly_time,
                 cmd.fire_advice ? 1 : 0));
         }

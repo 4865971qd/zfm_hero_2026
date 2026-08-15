@@ -24,7 +24,6 @@ public:
         int angular_selected_idx = -1;
         int stable_idx_before = -1;
         bool selection_held = false;
-        bool selection_pending = false;
         bool near_boundary = false;
         double select_margin = -1.0;
         double selected_dist = -1.0;
@@ -148,8 +147,6 @@ private:
     mutable double outpost_pending_since_ = -1.0;
     mutable double outpost_last_switch_time_ = -1.0;
     mutable int normal_stable_idx_ = -1;
-    mutable int normal_pending_idx_ = -1;
-    mutable int normal_pending_frames_ = 0;
     mutable DebugInfo debug_info_;
 
     Eigen::Vector3d selected_armor_pos_{0, 0, 0};

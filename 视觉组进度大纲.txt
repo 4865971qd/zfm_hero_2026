@@ -75,6 +75,12 @@ https://bbs.robomaster.com/article/1883295?source=1
 https://github.com/wele0612/Pacific_doorlock_sniper
 
 13.仿真器： https://github.com/Blackjack200/at_vision_simulator 
+		     https://github.com/Blackjack200/bevy_robomaster_simulator
+
+14.https://github.com/lovodllt/dx_vision
+
+15.https://github.com/hyheiyue/rose_navigation
+https://github.com/WUST-RM/wust_vision
 
 
 更多开源建议大家自己去RM社区，GitHub查找

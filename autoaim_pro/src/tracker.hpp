@@ -25,6 +25,7 @@ public:
         bool matched = false;
         int same_count = 0;
         int matched_plate = -1;
+        bool plate_pending = false;
         double dt = 0.0;
         double pos_diff = -1.0;
         double yaw_diff = -1.0;
@@ -90,6 +91,9 @@ private:
     double moving_since_ = -1.0;
     bool stationary_mode_ = false;
     double normal_last_seen_time_ = 0;
+    int normal_stable_plate_ = -1;
+    int normal_pending_plate_ = -1;
+    int normal_pending_frames_ = 0;
     int outpost_detect_count_ = 0;
     double d_za_ = 0;
     double d_zc_ = 0;

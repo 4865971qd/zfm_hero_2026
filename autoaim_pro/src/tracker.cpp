@@ -56,7 +56,7 @@ Tracker::Tracker(const YAML::Node &cfg) {
     last_t_ = std::chrono::steady_clock::now();
 }
 
-// ---- 初始化 ----
+// ---- 初始�?----
 void Tracker::init(const std::list<Armor> &armors,
                    std::chrono::steady_clock::time_point t) {
     if (armors.empty()) return;
@@ -91,6 +91,9 @@ void Tracker::init(const std::list<Armor> &armors,
     target_.normal_last_seen_time = normal_last_seen_time_;
     tracking_since_ = -1.0;
     lost_since_ = -1.0;
+    normal_stable_plate_ = -1;
+    normal_pending_plate_ = -1;
+    normal_pending_frames_ = 0;
     tracker_state_ = TrackerState::DETECTING;
     tracked_num_ = ArmorsNum::NORMAL_4;
 }
@@ -428,6 +431,7 @@ void Tracker::update(const std::list<Armor> &armors, std::chrono::steady_clock::
     if (!armors.empty()) {
         Armor same_id; int same_count = 0;
         double min_pos_diff = DBL_MAX;
+        double best_score = DBL_MAX;
         double yaw_diff = DBL_MAX;
         int matched_plate = 0;
         double matched_base_yaw = target_state_(6);
@@ -437,26 +441,39 @@ void Tracker::update(const std::list<Armor> &armors, std::chrono::steady_clock::
                 same_id = a; same_count++;
                 Eigen::Vector3d ap(a.xyz_in_world.x(), a.xyz_in_world.y(), a.xyz_in_world.z());
                 if (tracked_num_ == ArmorsNum::NORMAL_4) {
-                    for (int plate = 0; plate < 4; ++plate) {
-                        const double off = plate * M_PI / 2.0;
-                        const bool current_pair = (plate % 2 == 0);
-                        const double r = current_pair ? target_state_(8) : another_r_;
-                        const double dz = target_state_(9) + (current_pair ? 0.0 : d_za_);
-                        Eigen::Vector3d predicted_plate(
-                            target_state_(0) - r * std::cos(target_state_(6) + off),
-                            target_state_(2) - r * std::sin(target_state_(6) + off),
-                            target_state_(4) + dz);
-                        double pd = (predicted_plate - ap).norm();
-                        if (pd < min_pos_diff) {
-                            min_pos_diff = pd;
-                            matched_plate = plate;
+                    const int candidate_count = std::min(
+                        a.xyz_in_world_candidates.size(), a.ypr_in_world_candidates.size());
+                    const int eval_count = candidate_count > 0 ? candidate_count : 1;
+                    for (int pose_idx = 0; pose_idx < eval_count; ++pose_idx) {
+                        const Eigen::Vector3d ap_candidate = candidate_count > 0 ?
+                            a.xyz_in_world_candidates[pose_idx] :
+                            Eigen::Vector3d(a.xyz_in_world.x(), a.xyz_in_world.y(),
+                                            a.xyz_in_world.z());
+                        const Eigen::Vector3d ypr_candidate = candidate_count > 0 ?
+                            a.ypr_in_world_candidates[pose_idx] :
+                            Eigen::Vector3d(a.ypr_in_world.x(), a.ypr_in_world.y(),
+                                            a.ypr_in_world.z());
+                        const double pose_err = pose_idx < static_cast<int>(a.pnp_reprojection_errors.size()) ?
+                            a.pnp_reprojection_errors[pose_idx] : 0.0;
+                        const double pose_penalty = 0.02 * pose_err +
+                            0.08 * (1.0 - std::clamp(static_cast<double>(a.confidence), 0.0, 1.0));
+                        for (int plate = 0; plate < 4; ++plate) {
+                            const double off = plate * M_PI / 2.0;
+                            const bool current_pair = (plate % 2 == 0);
+                            const double r = current_pair ? target_state_(8) : another_r_;
+                            const double dz = target_state_(9) + (current_pair ? 0.0 : d_za_);
+                            Eigen::Vector3d predicted_plate(
+                                target_state_(0) - r * std::cos(target_state_(6) + off),
+                                target_state_(2) - r * std::sin(target_state_(6) + off),
+                                target_state_(4) + dz);
+                            double pd = (predicted_plate - ap_candidate).norm();
                             double best_yaw = unwrapNear(
-                                a.ypr_in_world[0] - off, target_state_(6));
+                                ypr_candidate[0] - off, target_state_(6));
                             double best_yaw_diff = angleDifference(best_yaw, target_state_(6));
                             for (int ambiguity_sign = -1; ambiguity_sign <= 1; ambiguity_sign += 2) {
                                 const double ambiguity = ambiguity_sign * M_PI;
                                 double candidate_yaw = unwrapNear(
-                                    a.ypr_in_world[0] + ambiguity - off, target_state_(6));
+                                    ypr_candidate[0] + ambiguity - off, target_state_(6));
                                 double candidate_diff =
                                     angleDifference(candidate_yaw, target_state_(6));
                                 if (candidate_diff < best_yaw_diff) {
@@ -464,9 +481,18 @@ void Tracker::update(const std::list<Armor> &armors, std::chrono::steady_clock::
                                     best_yaw_diff = candidate_diff;
                                 }
                             }
-                            yaw_diff = best_yaw_diff;
-                            matched_base_yaw = best_yaw;
-                            tracked_armor_ = a;
+                            const double score = pd + 0.35 * best_yaw_diff + pose_penalty;
+                            if (score < best_score) {
+                                best_score = score;
+                                min_pos_diff = pd;
+                                matched_plate = plate;
+                                yaw_diff = best_yaw_diff;
+                                matched_base_yaw = best_yaw;
+                                tracked_armor_ = a;
+                                tracked_armor_.xyz_in_world = ap_candidate;
+                                tracked_armor_.ypr_in_world = ypr_candidate;
+                                tracked_armor_.selected_pose_idx = pose_idx;
+                            }
                         }
                     }
                 } else {
@@ -487,9 +513,40 @@ void Tracker::update(const std::list<Armor> &armors, std::chrono::steady_clock::
             }
         }
 
-        if (min_pos_diff < max_match_dist_ &&
-            (tracked_num_ == ArmorsNum::NORMAL_4 || yaw_diff < max_match_yaw_)) {
+        const double pose_trust = std::clamp(1.0 - tracked_armor_.pose_ambiguity, 0.35, 1.0);
+        const double effective_max_match_dist =
+            max_match_dist_ * (0.70 + 0.30 * pose_trust);
+        const double effective_max_match_yaw =
+            max_match_yaw_ * (0.70 + 0.30 * pose_trust);
+
+        if (min_pos_diff < effective_max_match_dist &&
+            (tracked_num_ == ArmorsNum::NORMAL_4 || yaw_diff < effective_max_match_yaw)) {
+            int selected_plate = matched_plate;
+            bool plate_pending = false;
             if (tracked_num_ == ArmorsNum::NORMAL_4) {
+                if (normal_stable_plate_ < 0) {
+                    normal_stable_plate_ = matched_plate;
+                }
+
+                if (matched_plate != normal_stable_plate_) {
+                    if (normal_pending_plate_ == matched_plate) {
+                        ++normal_pending_frames_;
+                    } else {
+                        normal_pending_plate_ = matched_plate;
+                        normal_pending_frames_ = 1;
+                    }
+                    constexpr int kNormalPlateConfirmFrames = 2;
+                    if (normal_pending_frames_ < kNormalPlateConfirmFrames) {
+                        selected_plate = normal_stable_plate_;
+                        plate_pending = true;
+                    } else {
+                        selected_plate = matched_plate;
+                    }
+                } else {
+                    normal_pending_plate_ = -1;
+                    normal_pending_frames_ = 0;
+                }
+
                 const double off = matched_plate * M_PI / 2.0;
                 const bool current_pair = (matched_plate % 2 == 0);
                 const double observed_r = current_pair ? target_state_(8) : another_r_;
@@ -510,6 +567,12 @@ void Tracker::update(const std::list<Armor> &armors, std::chrono::steady_clock::
                                 equivalent_plate0.y(),
                                 equivalent_plate0.z(),
                                 base_yaw;
+                if (plate_pending) {
+                    measurement_ << target_state_(0) - target_state_(8) * std::cos(target_state_(6)),
+                                    target_state_(2) - target_state_(8) * std::sin(target_state_(6)),
+                                    target_state_(4) + target_state_(9),
+                                    target_state_(6);
+                }
             } else {
                 measurement_ << tracked_armor_.xyz_in_world.x(),
                                 tracked_armor_.xyz_in_world.y(),
@@ -525,7 +588,8 @@ void Tracker::update(const std::list<Armor> &armors, std::chrono::steady_clock::
             residual(3) = normalizeAngle(residual(3));
 
             debug_info_.same_count = same_count;
-            debug_info_.matched_plate = matched_plate;
+            debug_info_.matched_plate = selected_plate;
+            debug_info_.plate_pending = plate_pending;
             debug_info_.pos_diff = min_pos_diff;
             debug_info_.yaw_diff = yaw_diff;
             debug_info_.measurement = measurement_;
@@ -538,15 +602,24 @@ void Tracker::update(const std::list<Armor> &armors, std::chrono::steady_clock::
                 matched = true;
                 debug_info_.matched = true;
                 target_state_ = updated_state;
-                if (tracked_num_ == ArmorsNum::NORMAL_4 && matched_plate % 2 == 1) {
+                if (tracked_num_ == ArmorsNum::NORMAL_4 && !plate_pending) {
+                    normal_stable_plate_ = selected_plate;
+                    if (normal_pending_plate_ == selected_plate) {
+                        normal_pending_plate_ = -1;
+                        normal_pending_frames_ = 0;
+                    }
+                }
+                if (tracked_num_ == ArmorsNum::NORMAL_4 && matched_plate % 2 == 1 && !plate_pending) {
                     const double measured_d_za =
                         tracked_armor_.xyz_in_world.z() - (target_state_(4) + target_state_(9));
                     if (std::isfinite(measured_d_za) && std::abs(measured_d_za) < 0.25) {
                         d_za_ += 0.05 * (measured_d_za - d_za_);
                     }
                 }
-                normal_last_seen_time_ = t_sec;
-                target_.armor_type = tracked_armor_.type;
+                if (!plate_pending) {
+                    normal_last_seen_time_ = t_sec;
+                    target_.armor_type = tracked_armor_.type;
+                }
             } else {
                 target_state_ = state_before_update;
                 ekf_->setState(target_state_);
@@ -565,8 +638,11 @@ void Tracker::update(const std::list<Armor> &armors, std::chrono::steady_clock::
         if (!debug_info_.matched) {
             debug_info_.same_count = same_count;
             debug_info_.matched_plate = matched_plate;
+            debug_info_.plate_pending = false;
             debug_info_.pos_diff = min_pos_diff < DBL_MAX ? min_pos_diff : -1.0;
             debug_info_.yaw_diff = yaw_diff < DBL_MAX ? yaw_diff : -1.0;
+            normal_pending_plate_ = -1;
+            normal_pending_frames_ = 0;
         }
 
         if (debug_ && tracked_num_ == ArmorsNum::NORMAL_4) {
@@ -574,14 +650,14 @@ void Tracker::update(const std::list<Armor> &armors, std::chrono::steady_clock::
             ++normal_track_log_sequence;
             if (!matched || normal_track_log_sequence % 20 == 1) {
                 getLogger()->debug(
-                    "[Normal][TRACK] seq={} id={} state={} matched={} same_count={} plate={} "
+                    "[Normal][TRACK] seq={} id={} state={} matched={} same_count={} plate={} pending={} "
                     "dt={:.4f} stationary={} pos_diff={:.3f} yaw_diff={:.3f} "
                     "meas=({:.3f},{:.3f},{:.3f}) meas_yaw={:.3f} "
                     "center=({:.3f},{:.3f},{:.3f}) yaw={:.3f} v_yaw={:.3f} "
                     "r=({:.3f},{:.3f}) dz=({:.3f},{:.3f})",
                     normal_track_log_sequence, tracked_id_,
                     static_cast<int>(tracker_state_), matched ? 1 : 0, same_count,
-                    matched_plate,
+                    debug_info_.matched_plate, debug_info_.plate_pending ? 1 : 0,
                     dt, stationary_mode_ ? 1 : 0, min_pos_diff, yaw_diff,
                     tracked_armor_.xyz_in_world.x(),
                     tracked_armor_.xyz_in_world.y(),
@@ -592,7 +668,10 @@ void Tracker::update(const std::list<Armor> &armors, std::chrono::steady_clock::
                     target_state_(8), another_r_, target_state_(9), d_za_);
             }
         }
-    } else if (debug_ && tracked_num_ == ArmorsNum::NORMAL_4) {
+    } else {
+        normal_pending_plate_ = -1;
+        normal_pending_frames_ = 0;
+        if (debug_ && tracked_num_ == ArmorsNum::NORMAL_4) {
         static unsigned long long normal_empty_log_sequence = 0;
         if (++normal_empty_log_sequence % 20 == 1) {
             getLogger()->debug(
@@ -601,6 +680,7 @@ void Tracker::update(const std::list<Armor> &armors, std::chrono::steady_clock::
                 tracked_id_, static_cast<int>(tracker_state_), dt,
                 target_state_(0), target_state_(2), target_state_(4),
                 target_state_(6), target_state_(7));
+        }
         }
     }
 
@@ -653,7 +733,7 @@ void Tracker::update(const std::list<Armor> &armors, std::chrono::steady_clock::
     target_.valid = (tracker_state_ == TrackerState::TRACKING || tracker_state_ == TrackerState::TEMP_LOST);
 }
 
-// ---- 主入口 ----
+// ---- 主入�?----
 void Tracker::track(std::list<Armor> &armors, std::chrono::steady_clock::time_point t) {
     if (tracker_state_ == TrackerState::LOST) init(armors, t);
     else update(armors, t);
@@ -670,3 +750,11 @@ bool Tracker::getOutpostCircleParams(double &cx, double &cy, double &R, double &
 }
 
 }  // namespace autoaim
+
+
+
+
+
+
+
+
