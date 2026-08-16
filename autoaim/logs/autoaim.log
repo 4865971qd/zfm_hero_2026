@@ -1,4 +1,0 @@
-[2026-07-23 19:48:55.509] [autoaim] [error] No camera found!
-[2026-07-23 19:48:55.509] [autoaim] [info] Serial opened: /tmp/ttyACM_mcu @ 115200 8N1
-[2026-07-23 19:48:55.513] [autoaim] [info] Classifier loaded: models/lenet.onnx (9 classes: 1 2 3 4 5 outpost sentry base negative )
-[2026-07-23 19:48:55.513] [autoaim] [info] AutoAim initialized. Waiting for data...
