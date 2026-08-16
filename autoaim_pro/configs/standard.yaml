@@ -8,8 +8,8 @@ camera:
 # ============ 离线回放 ============
 video:
   enable: false
-  path: "../demo.avi"
-  fps: 10.0
+  path: "../outpost.avi"
+  fps: 230.0
   loop: false
 
 # ============ 相机内参 (二选一，注释掉不用的) ============
@@ -17,18 +17,18 @@ video:
 #camera_matrix: [3510.79, 0, 717.79, 0, 3511.56, 556.75, 0, 0, 1]
 #distort_coeffs: [0.0132, 0.2626, -0.0032, 0.0013, 0.0]
 
-# --- demo视频: sp_ws2 相机 ---
-camera_matrix: [1818.37, 0, 751.06, 0, 1822.49, 530.44, 0, 0, 1]
-distort_coeffs: [-0.0779, 0.1545, -0.0026, 0.00083, 0]
+# --- demo视频: 相机 ---
+camera_matrix: [2318.84, 0, 720, 0, 2318.84, 540, 0, 0, 1]
+distort_coeffs: [0.0, 0.0, 0.0, 0.0, 0.0]
 
 # ============ 外参: odom→camera (xyz米, rpy弧度) ============
 odom2camera:
-  xyz: [0.246, 0.0, 0.049]
-  rpy: [0.0, 0.275, 0.015]
+  xyz: [0.0, 0.0, 0.0]
+  rpy: [0.0, 0.0, 0.0]
 
 # ============ 检测 ============
 detector:
-  detect_color: 1           # 0=蓝色 1=红色  (demo.avi 是蓝色)
+  detect_color: 0           # 1=蓝色 0=红色  (demo.avi 是蓝色)
   binary_thres: 90
 
   light:
@@ -47,8 +47,8 @@ detector:
 
   classifier_threshold: 0.7
   ignore_classes: ["negative"]
-  classifier_model: "models/lenet.onnx"
-  classifier_label: "models/label.txt"
+  classifier_model: "../models/lenet.onnx"
+  classifier_label: "../models/label.txt"
 
 # ============ 跟踪 ============
 tracker:

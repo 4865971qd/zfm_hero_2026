@@ -76,6 +76,34 @@ int main(int argc, char *argv[]) {
         }
         tracker.track(armor_list, t);
 
+        // ====== 预测框(整车观测) vs 检测框 对比日志 (调试用) ======
+        if (tracker.hasTarget() && !armor_list.empty() && frame_cnt % 20 == 0) {
+            auto target = tracker.getTarget();
+            auto preds = target.armorXYZA();
+            for (size_t i = 0; i < preds.size(); ++i) {
+                const Eigen::Vector3d pp = preds[i].head<3>();
+                const autoaim::Armor *best_a = nullptr;
+                double best_d3 = 1e9;
+                for (const auto &a : armor_list) {
+                    double d3 = (a.xyz_in_world - pp).norm();
+                    if (d3 < best_d3) { best_d3 = d3; best_a = &a; }
+                }
+                if (best_a) {
+                    auto pts = solver.reproject(pp, preds[i][3],
+                        target.armor_type, target.armor_num == 3);
+                    cv::Point2f pc;
+                    if (pts.size() >= 4)
+                        pc = (pts[0] + pts[1] + pts[2] + pts[3]) * 0.25f;
+                    fmt::print("[MATCH] pred{} world=({:.3f},{:.3f},{:.3f}) "
+                        "det world=({:.3f},{:.3f},{:.3f}) d3d={:.3f}m dpx={:.1f}\n",
+                        i, pp.x(), pp.y(), pp.z(),
+                        best_a->xyz_in_world.x(), best_a->xyz_in_world.y(),
+                        best_a->xyz_in_world.z(),
+                        best_d3, cv::norm(best_a->center - pc));
+                }
+            }
+        }
+
         if (!armor_list.empty()) detect_cnt++;
         if (tracker.hasTarget()) track_cnt++;
 

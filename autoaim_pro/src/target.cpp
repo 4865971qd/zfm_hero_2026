@@ -17,11 +17,9 @@ constexpr double kMaxAssociationError = 55.0 * M_PI / 180.0;
 constexpr double kMaxPhaseCorrection = 15.0 * M_PI / 180.0;
 constexpr double kMinCircleFitDuration = 1.20;
 constexpr double kMinCircleFitSpan = 0.30;
-constexpr double kMinCircleFitSpanRadiusRatio = 1.70;
+constexpr double kMinCircleFitSpanRadiusRatio = 1.60;
 constexpr double kMaxCircleFitMedianResidual = 0.06;
 constexpr double kMaxCircleFitP80Residual = 0.10;
-constexpr double kMinFittedRadius = 0.15;
-constexpr double kMaxFittedRadius = 0.36;
 constexpr double kFitConfirmationInterval = 0.25;
 constexpr double kMaxFitCenterShift = 0.05;
 constexpr double kMaxFitRadiusShift = 0.03;
@@ -40,11 +38,16 @@ struct CircleFitResult {
     double span = 0;
 };
 
+// 固定半径圆拟合：半径固定（已知前哨站旋转半径），只估计圆心 (cx, cy)。
+// 相比自由半径拟合，短弧（~115°）下圆心估计不再被病态压缩/拉偏。
 bool fitRobustFreeRadiusCircle(const std::vector<double> &xs,
                                const std::vector<double> &ys,
+                               double fixed_radius,
                                CircleFitResult &result) {
     if (xs.size() != ys.size() || xs.size() < kMinCircleFitSamples) return false;
+    if (!std::isfinite(fixed_radius) || fixed_radius <= 0.0) return false;
 
+    // 代数初始化：自由圆给出圆心初值（半径初值不用于迭代）
     Eigen::Matrix3d normal = Eigen::Matrix3d::Zero();
     Eigen::Vector3d rhs = Eigen::Vector3d::Zero();
     for (size_t i = 0; i < xs.size(); ++i) {
@@ -59,39 +62,33 @@ bool fitRobustFreeRadiusCircle(const std::vector<double> &xs,
     if (!algebraic.allFinite()) return false;
     double cx = algebraic.x();
     double cy = algebraic.y();
-    const double radius_sq = algebraic.z() + cx * cx + cy * cy;
-    if (!std::isfinite(radius_sq) || radius_sq <= 0) return false;
-    double fitted_radius = std::sqrt(radius_sq);
 
+    // Huber 迭代：只更新 (cx, cy)，半径固定
     constexpr double kHuberDelta = 0.06;
-    for (int iteration = 0; iteration < 12; ++iteration) {
-        Eigen::Matrix3d hessian = Eigen::Matrix3d::Zero();
-        Eigen::Vector3d gradient = Eigen::Vector3d::Zero();
+    for (int iteration = 0; iteration < 20; ++iteration) {
+        Eigen::Matrix2d hessian = Eigen::Matrix2d::Zero();
+        Eigen::Vector2d gradient = Eigen::Vector2d::Zero();
         for (size_t i = 0; i < xs.size(); ++i) {
             const double dx = cx - xs[i];
             const double dy = cy - ys[i];
             const double distance = std::hypot(dx, dy);
             if (!std::isfinite(distance) || distance < 1e-6) continue;
-            const double error = distance - fitted_radius;
+            const double error = distance - fixed_radius;
             const double weight = std::abs(error) <= kHuberDelta ?
                 1.0 : kHuberDelta / std::abs(error);
-            const Eigen::Vector3d jacobian(dx / distance, dy / distance, -1.0);
+            const Eigen::Vector2d jacobian(dx / distance, dy / distance);
             hessian += weight * jacobian * jacobian.transpose();
             gradient += weight * jacobian * error;
         }
         if (std::abs(hessian.determinant()) < 1e-10) return false;
-        Eigen::Vector3d step = -hessian.ldlt().solve(gradient);
+        Eigen::Vector2d step = -hessian.ldlt().solve(gradient);
         if (!step.allFinite()) return false;
-        const double center_step = std::hypot(step.x(), step.y());
+        const double center_step = step.norm();
         if (center_step > 0.10) {
-            step.x() *= 0.10 / center_step;
-            step.y() *= 0.10 / center_step;
+            step *= 0.10 / center_step;
         }
-        step.z() = std::clamp(step.z(), -0.05, 0.05);
         cx += step.x();
         cy += step.y();
-        fitted_radius += step.z();
-        if (!std::isfinite(fitted_radius) || fitted_radius <= 0.05) return false;
         if (step.norm() < 1e-6) break;
     }
 
@@ -100,7 +97,7 @@ bool fitRobustFreeRadiusCircle(const std::vector<double> &xs,
     double max_span_sq = 0;
     for (size_t i = 0; i < xs.size(); ++i) {
         residuals.push_back(
-            std::abs(std::hypot(xs[i] - cx, ys[i] - cy) - fitted_radius));
+            std::abs(std::hypot(xs[i] - cx, ys[i] - cy) - fixed_radius));
         for (size_t j = i + 1; j < xs.size(); ++j) {
             const double dx = xs[i] - xs[j];
             const double dy = ys[i] - ys[j];
@@ -115,12 +112,11 @@ bool fitRobustFreeRadiusCircle(const std::vector<double> &xs,
 
     result.cx = cx;
     result.cy = cy;
-    result.free_radius = fitted_radius;
+    result.free_radius = fixed_radius;
     result.median_residual = residuals[median_index];
     result.p80_residual = residuals[p80_index];
     result.span = std::sqrt(max_span_sq);
-    return std::isfinite(cx) && std::isfinite(cy) &&
-           std::isfinite(result.free_radius) && std::isfinite(result.span);
+    return std::isfinite(cx) && std::isfinite(cy) && std::isfinite(result.span);
 }
 
 double recomputeAccumulatedAngle(const std::vector<double> &xs,
@@ -311,12 +307,11 @@ bool OutpostTracker::addMeasurement(double x, double y, double z, double yaw, do
         }
 
         CircleFitResult fit;
-        const bool fit_solved = fitRobustFreeRadiusCircle(traj_x_, traj_y_, fit);
+        const bool fit_solved = fitRobustFreeRadiusCircle(traj_x_, traj_y_, fixed_R_, fit);
         const double fit_coverage = fit_solved && fit.free_radius > 0 ?
             fit.span / fit.free_radius : 0.0;
         const bool fit_quality_ok = fit_solved && fit.span >= kMinCircleFitSpan &&
             fit_coverage >= kMinCircleFitSpanRadiusRatio &&
-            fit.free_radius >= kMinFittedRadius && fit.free_radius <= kMaxFittedRadius &&
             fit.median_residual <= kMaxCircleFitMedianResidual &&
             fit.p80_residual <= kMaxCircleFitP80Residual;
         if (!fit_quality_ok) {
